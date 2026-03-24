@@ -435,21 +435,34 @@ with st.sidebar:
     st.markdown("---")
     st.markdown('<div class="sidebar-label">League Setup</div>', unsafe_allow_html=True)
 
-    num_leagues = st.number_input("Number of leagues", min_value=1, max_value=8, value=1, step=1)
+    num_leagues = st.number_input("Number of leagues", min_value=1, max_value=8, value=2, step=1)
+
+    DEFAULT_LEAGUE_NAMES = ["Division 1", "Division 2"]
+    DEFAULT_LEAGUE_TEAMS = [
+        (
+            "Burnmoor 1st XI\nSouth Northumberland 1st XI\nCastle Eden 1st XI\n"
+            "Felling 1st XI\nChester Le Street 1st XI\nHetton Lyons 1st XI\n"
+            "Burnopfield 1st XI\nNewcastle 1st XI\nAshington 1st XI\n"
+            "Shotley Bridge 1st XI\nBenwell Hill 1st XI\nSeaham Harbour 1st XI"
+        ),
+        (
+            "Felling 2nd XI\nNewcastle City CC 2nd XI\nChester Le Street 2nd XI\n"
+            "Ashington 2nd XI\nSouth Northumberland 2nd XI\nNewcastle 2nd XI\n"
+            "Tynemouth 2nd XI\nBenwell Hill 2nd XI\nTynedale 2nd XI\n"
+            "Hetton Lyons 2nd XI\nWhitburn 2nd XI\nCastle Eden 2nd XI"
+        ),
+    ]
 
     league_configs = []
     for i in range(int(num_leagues)):
         st.markdown(f'<hr class="league-divider">', unsafe_allow_html=True)
-        default_name = f"Division {i + 1}" if num_leagues > 1 else "League"
+        default_name = DEFAULT_LEAGUE_NAMES[i] if i < len(DEFAULT_LEAGUE_NAMES) else f"Division {i + 1}"
         league_name = st.text_input(
             f"League {i + 1} name",
             value=default_name,
             key=f"league_name_{i}"
         )
-        default_teams = (
-            "Ashington CC\nBlyth CC\nMorpeth CC\nAlnwick CC\nTynemouth CC\nBedlington CC"
-            if i == 0 else ""
-        )
+        default_teams = DEFAULT_LEAGUE_TEAMS[i] if i < len(DEFAULT_LEAGUE_TEAMS) else ""
         teams_input = st.text_area(
             f"Teams in {league_name} (one per line)",
             value=default_teams,
