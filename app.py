@@ -295,6 +295,132 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
+def detect_shared_grounds(league_configs):
+    """Return a pre-filled string of team pairs that likely share a ground.
+
+    Two teams are flagged as sharing a ground when they share the same 'base
+    name' — i.e. after stripping common ordinal / team-type suffixes the
+    leading words match.  Examples that will match:
+      Newcastle 1st XI  ↔  Newcastle 2nd XI
+      Ashington CC 1sts ↔  Ashington CC 2nds
+    """
+    SUFFIXES = {
+        "1st", "2nd", "3rd", "4th", "5th",
+        "xi", "xii",
+        "1sts", "2nds", "3rds", "4ths",
+        "a", "b", "c",
+        "fc", "cc", "afc", "rfc",
+        "united", "city", "town", "rovers", "athletic",
+        "cricket", "club",
+    }
+
+    def base_name(team: str) -> str:
+        words = team.lower().split()
+        while words and words[-1] in SUFFIXES:
+            words.pop()
+        return " ".join(words)
+
+    all_teams = []
+    for cfg in league_configs:
+        for t in cfg["teams_raw"].split("\n"):
+            t = t.strip()
+            if t:
+                all_teams.append(t)
+
+    from collections import defaultdict
+    groups: dict = defaultdict(list)
+    for team in all_teams:
+        bn = base_name(team)
+        if bn:
+            groups[bn].append(team)
+
+    pairs = []
+    for group in groups.values():
+        if len(group) >= 2:
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    pairs.append(f"{group[i]}, {group[j]}")
+
+    return "\n".join(pairs)
+
+
+def resolve_ground_conflicts_global(leagues_data: dict, ground_assignments: dict) -> dict:
+    """Resolve home-fixture clashes between shared-ground teams across ALL leagues.
+
+    resolve_ground_conflicts (from scheduler.py) only sees one league's
+    schedule at a time, so cross-league clashes slip through.  This function
+    does a second pass over the combined schedule: whenever two teams that
+    share a ground are both at home on the same date (regardless of league)
+    it nudges the later-alphabetical team's game forward by one week,
+    repeating until no conflicts remain.
+    """
+    from datetime import timedelta
+
+    # Build reverse map: ground_name → [team, ...]
+    from collections import defaultdict
+    ground_to_teams: dict = defaultdict(list)
+    for team, ground in ground_assignments.items():
+        if team not in ground_to_teams[ground]:
+            ground_to_teams[ground].append(team)
+
+    max_iterations = 200
+    iteration = 0
+
+    while iteration < max_iterations:
+        iteration += 1
+        conflict_found = False
+
+        for ground, sharing_teams in ground_to_teams.items():
+            # Collect all home games for each sharing team across all leagues
+            for i in range(len(sharing_teams)):
+                for j in range(i + 1, len(sharing_teams)):
+                    team_a = sharing_teams[i]
+                    team_b = sharing_teams[j]
+
+                    # Dates when team_a is at home
+                    home_dates_a = set()
+                    for league_data in leagues_data.values():
+                        for game in league_data["schedule"]:
+                            if game[1] == team_a:
+                                home_dates_a.add(game[0])
+
+                    # Dates when team_b is at home
+                    home_dates_b = set()
+                    for league_data in leagues_data.values():
+                        for game in league_data["schedule"]:
+                            if game[1] == team_b:
+                                home_dates_b.add(game[0])
+
+                    clashing_dates = home_dates_a & home_dates_b
+                    if not clashing_dates:
+                        continue
+
+                    conflict_found = True
+                    clash_date = sorted(clashing_dates)[0]
+
+                    # Move team_b's home game(s) on that date forward by one week
+                    for league_name, league_data in leagues_data.items():
+                        new_schedule = []
+                        for game in league_data["schedule"]:
+                            if game[1] == team_b and game[0] == clash_date:
+                                new_schedule.append((game[0] + timedelta(weeks=1), game[1], game[2]))
+                            else:
+                                new_schedule.append(game)
+                        leagues_data[league_name]["schedule"] = sorted(new_schedule, key=lambda g: g[0])
+
+                    break   # restart outer loop after first fix
+                if conflict_found:
+                    break
+            if conflict_found:
+                break
+
+        if not conflict_found:
+            break
+
+    return leagues_data
+
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<div class="sidebar-label">Season Settings</div>', unsafe_allow_html=True)
@@ -345,11 +471,14 @@ with st.sidebar:
 
     ground_assignments = {}
     if ground_conflict_enabled:
+        auto_pairs = detect_shared_grounds(league_configs)
         ground_input = st.text_area(
             "Shared grounds (one pair per line)\nFormat: Team A, Team B",
-            "Ashington CC, Blyth CC",
-            height=100
+            value=auto_pairs if auto_pairs else "Team A, Team B",
+            height=120
         )
+        if auto_pairs:
+            st.caption("✅ Auto-detected from team names — edit if needed.")
         for line in ground_input.split("\n"):
             line = line.strip()
             if "," in line:
@@ -386,10 +515,16 @@ if generate:
         rounds = group_into_rounds(fixtures, teams)
         schedule = assign_dates(rounds, start_date, blackout_dates)
 
-        if ground_conflict_enabled and ground_assignments:
-            schedule = resolve_ground_conflicts(schedule, ground_assignments)
-
         leagues_data[league_name] = {"teams": teams, "schedule": schedule}
+
+    # Pass 1: per-league (handles clashes within the same league)
+    if ground_conflict_enabled and ground_assignments:
+        for ln in leagues_data:
+            leagues_data[ln]["schedule"] = resolve_ground_conflicts(
+                leagues_data[ln]["schedule"], ground_assignments
+            )
+        # Pass 2: cross-league (catches e.g. 1st XI vs 2nd XI in different leagues)
+        leagues_data = resolve_ground_conflicts_global(leagues_data, ground_assignments)
 
     st.session_state.leagues_data = leagues_data
     st.session_state.ground_assignments = ground_assignments
