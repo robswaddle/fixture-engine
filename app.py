@@ -306,13 +306,11 @@ def detect_shared_grounds(league_configs):
       Ashington CC 1sts ↔  Ashington CC 2nds
     """
     SUFFIXES = {
+        # Ordinal team markers only — never strip words that are part of a club name
         "1st", "2nd", "3rd", "4th", "5th",
         "xi", "xii",
         "1sts", "2nds", "3rds", "4ths",
         "a", "b", "c",
-        "fc", "cc", "afc", "rfc",
-        "united", "city", "town", "rovers", "athletic",
-        "cricket", "club",
     }
 
     def base_name(team: str) -> str:
