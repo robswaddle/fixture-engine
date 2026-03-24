@@ -523,10 +523,7 @@ if generate:
             continue
 
         fixtures = generate_round_robin(teams)
-
-        # 🔥 NEW: ILP adjustment
         rounds = adjust_schedule_with_ilp(fixtures, teams)
-
         schedule = assign_dates(rounds, start_date, blackout_dates)
 
         leagues_data[league_name] = {"teams": teams, "schedule": schedule}
