@@ -3,53 +3,47 @@ import csv
 
 
 def generate_round_robin(teams):
-    """Return a list of rounds using the circle/polygon algorithm.
+    """Return a balanced list of rounds using the circle/polygon algorithm.
 
-    Each round is a list of (home, away) tuples.  Every round is guaranteed
-    to be full (n//2 fixtures) — no team appears twice in the same round.
-    A double round-robin is produced: the second half mirrors the first with
-    home/away swapped so every pair meets twice, once at each ground.
+    Rounds are interleaved (first-half round 1, second-half round 1, etc.)
+    so that home/away alternates as evenly as possible — no team will ever
+    have more than 2 consecutive home or away games.
 
-    If the number of teams is odd a BYE is inserted temporarily and removed
-    from the output.
+    Every round is guaranteed to be full (n//2 fixtures).
     """
     team_list = list(teams)
-    bye_inserted = False
     if len(team_list) % 2 == 1:
         team_list.append("BYE")
-        bye_inserted = True
 
     n = len(team_list)
     first_half = []
 
-    # Fix the last team; rotate the rest clockwise each round
-    for round_idx in range(n - 1):
-        round_fixtures = []
+    for _ in range(n - 1):
+        rnd = []
         for i in range(n // 2):
             home = team_list[i]
             away = team_list[n - 1 - i]
-            # Alternate which side gets home advantage each round for the
-            # fixed-slot pair so the BYE (if any) is easy to filter
             if home != "BYE" and away != "BYE":
-                round_fixtures.append((home, away))
-        first_half.append(round_fixtures)
-        # Rotate: index 0 is fixed, rotate positions 1..n-1
+                rnd.append((home, away))
+        first_half.append(rnd)
         team_list = [team_list[0]] + [team_list[-1]] + team_list[1:-1]
 
-    # Second half: swap home/away for every fixture
     second_half = [[(away, home) for home, away in rnd] for rnd in first_half]
 
-    return first_half + second_half
+    # Interleave first and second halves so H/A alternates cleanly
+    interleaved = []
+    for f, s in zip(first_half, second_half):
+        interleaved.append(f)
+        interleaved.append(s)
+    return interleaved
 
 
 def group_into_rounds(fixtures, teams):
-    """Pass-through: generate_round_robin already returns full rounds.
+    """Pass-through kept for backwards-compatibility.
 
-    Kept for backwards-compatibility — fixtures is expected to already be a
-    list of rounds (list of lists) as returned by generate_round_robin.
+    generate_round_robin now returns fully balanced rounds directly.
     """
     return fixtures
-
 
 def assign_dates(rounds, start_date, blackout_dates=[], interval_days=7):
     schedule = []
