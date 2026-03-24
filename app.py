@@ -637,7 +637,7 @@ if "leagues_data" in st.session_state and st.session_state.leagues_data:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-title">⚖️ Home / Away Balance</div>', unsafe_allow_html=True)
 
-        bal_tab, pat_tab = st.tabs(["Summary", "Pattern"])
+        pat_tab, bal_tab = st.tabs(["Pattern", "Summary"])
 
         with bal_tab:
             balance_html = '<div class="card">'
