@@ -637,22 +637,102 @@ if "leagues_data" in st.session_state and st.session_state.leagues_data:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-title">⚖️ Home / Away Balance</div>', unsafe_allow_html=True)
 
-        balance_html = '<div class="card">'
-        for league_name, data in leagues_data.items():
-            if len(leagues_data) > 1:
-                balance_html += f'<div class="balance-league-label">🏆 {league_name}</div>'
-            for team in data["teams"]:
-                schedule = data["schedule"]
-                home = sum(1 for g in schedule if g[1] == team)
-                away = sum(1 for g in schedule if g[2] == team)
-                balance_html += f"""
-                <div class="balance-row">
-                    <span class="balance-team">{team}</span>
-                    <span class="balance-stats">{home}H &nbsp; {away}A</span>
-                    <span class="balance-pill">Balanced</span>
-                </div>"""
-        balance_html += "</div>"
-        st.markdown(balance_html, unsafe_allow_html=True)
+        bal_tab, pat_tab = st.tabs(["Summary", "Pattern"])
+
+        with bal_tab:
+            balance_html = '<div class="card">'
+            for league_name, data in leagues_data.items():
+                if len(leagues_data) > 1:
+                    balance_html += f'<div class="balance-league-label">🏆 {league_name}</div>'
+                for team in data["teams"]:
+                    schedule = data["schedule"]
+                    home = sum(1 for g in schedule if g[1] == team)
+                    away = sum(1 for g in schedule if g[2] == team)
+                    balance_html += f"""
+                    <div class="balance-row">
+                        <span class="balance-team">{team}</span>
+                        <span class="balance-stats">{home}H &nbsp; {away}A</span>
+                        <span class="balance-pill">Balanced</span>
+                    </div>"""
+            balance_html += "</div>"
+            st.markdown(balance_html, unsafe_allow_html=True)
+
+        with pat_tab:
+            # Build pattern: for each team, collect their fixtures in date order
+            # and mark each as H (home) or A (away)
+            pattern_html = """
+            <style>
+            .pat-grid { display: flex; flex-direction: column; gap: 0.55rem; padding: 0.25rem 0; }
+            .pat-row  { display: flex; align-items: center; gap: 0.5rem; }
+            .pat-name { font-size: 0.78rem; font-weight: 500; color: #1A1A2E;
+                        min-width: 130px; max-width: 130px; white-space: nowrap;
+                        overflow: hidden; text-overflow: ellipsis; }
+            .pat-squares { display: flex; gap: 3px; flex-wrap: wrap; }
+            .sq {
+                width: 16px; height: 16px; border-radius: 3px;
+                display: inline-flex; align-items: center; justify-content: center;
+                font-size: 0.55rem; font-weight: 700; color: white;
+                cursor: default; flex-shrink: 0;
+            }
+            .sq-h { background: #1B4332; }
+            .sq-a { background: #D1FAE5; color: #1B4332; }
+            .pat-league-label {
+                font-family: 'Outfit', sans-serif;
+                font-size: 0.68rem; font-weight: 600;
+                text-transform: uppercase; letter-spacing: 1px;
+                color: #9CA3AF; padding: 0.6rem 0 0.2rem 0;
+            }
+            .pat-legend { display: flex; gap: 1rem; align-items: center;
+                          font-size: 0.75rem; color: #6B7280; margin-bottom: 0.75rem; }
+            .pat-legend-item { display: flex; align-items: center; gap: 4px; }
+            </style>
+            <div class="card">
+            <div class="pat-legend">
+                <div class="pat-legend-item">
+                    <div class="sq sq-h">H</div> Home
+                </div>
+                <div class="pat-legend-item">
+                    <div class="sq sq-a">A</div> Away
+                </div>
+            </div>
+            <div class="pat-grid">
+            """
+
+            all_dates = sorted(set(
+                g[0]
+                for data in leagues_data.values()
+                for g in data["schedule"]
+            ))
+            # Map date → round number (position in the sorted unique date list)
+            date_to_round = {d: i + 1 for i, d in enumerate(all_dates)}
+
+            for league_name, data in leagues_data.items():
+                if len(leagues_data) > 1:
+                    pattern_html += f'<div class="pat-league-label">🏆 {league_name}</div>'
+
+                league_dates = sorted(set(g[0] for g in data["schedule"]))
+
+                for team in data["teams"]:
+                    team_games = sorted(
+                        [g for g in data["schedule"] if g[1] == team or g[2] == team],
+                        key=lambda g: g[0]
+                    )
+                    squares = ""
+                    for game in team_games:
+                        rnd = date_to_round[game[0]]
+                        label = "H" if game[1] == team else "A"
+                        css   = "sq-h" if label == "H" else "sq-a"
+                        tip   = f"Rd {rnd} · {game[0].strftime('%d %b')} · {'Home' if label == 'H' else 'Away'}"
+                        squares += f'<div class="sq {css}" title="{tip}">{label}</div>'
+
+                    pattern_html += f"""
+                    <div class="pat-row">
+                        <span class="pat-name" title="{team}">{team}</span>
+                        <div class="pat-squares">{squares}</div>
+                    </div>"""
+
+            pattern_html += "</div></div>"
+            st.markdown(pattern_html, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-title">🤖 Fixture Assistant</div>', unsafe_allow_html=True)
