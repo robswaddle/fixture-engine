@@ -40,56 +40,64 @@ def generate_round_robin(teams):
 # -------------------------------
 def adjust_schedule_with_ilp(rounds, teams):
     """
-    SAFE ILP: only adjusts home/away (not match pairings)
-    Guarantees:
-    - All matches preserved
-    - All rounds full
-    - No duplicate/missing games
+    SAFE ILP:
+    - Keeps Berger structure
+    - Balances home/away (linear)
+    - Prevents 3 consecutive home/away
     """
+
+    import pulp
 
     num_rounds = len(rounds)
 
     prob = pulp.LpProblem("HomeAwayBalancing", pulp.LpMinimize)
 
-    # Binary: 1 = keep original home, 0 = flip
+    # Flip per round (0 = original, 1 = flipped)
     flip = pulp.LpVariable.dicts(
         "flip",
-        (r for r in range(num_rounds)),
+        range(num_rounds),
         cat="Binary"
     )
 
-    # Track home games per team
+    # Track home games
     home_count = {team: [] for team in teams}
 
-    # Build expressions
     for r, rnd in enumerate(rounds):
         for (h, a) in rnd:
-            # If flip = 0 → h is home
-            # If flip = 1 → a is home
             home_count[h].append(1 - flip[r])
             home_count[a].append(flip[r])
 
     # -------------------------------
-    # OBJECTIVE: balance home counts
+    # LINEAR BALANCING (no squares)
     # -------------------------------
-    avg_home = (len(teams) - 1) / 2
+    total_games = len(teams) - 1
+    target_home = total_games / 2
 
-    prob += pulp.lpSum(
-        (pulp.lpSum(home_count[team]) - avg_home) ** 2
-        for team in teams
-    )
+    deviation = {}
+
+    for team in teams:
+        deviation[team] = pulp.LpVariable(f"dev_{team}", lowBound=0)
+
+        prob += pulp.lpSum(home_count[team]) - target_home <= deviation[team]
+        prob += target_home - pulp.lpSum(home_count[team]) <= deviation[team]
+
+    # Objective: minimize total deviation
+    prob += pulp.lpSum(deviation[team] for team in teams)
 
     # -------------------------------
     # NO 3 CONSECUTIVE HOME/AWAY
     # -------------------------------
     for team in teams:
         for r in range(num_rounds - 2):
+
+            # Home streak
             prob += (
                 home_count[team][r] +
                 home_count[team][r + 1] +
                 home_count[team][r + 2]
             ) <= 2
 
+            # Away streak
             prob += (
                 (1 - home_count[team][r]) +
                 (1 - home_count[team][r + 1]) +
