@@ -1,6 +1,6 @@
 import streamlit as st
 from datetime import date
-from scheduler import generate_round_robin, group_into_rounds, assign_dates, reschedule_game, resolve_ground_conflicts
+from scheduler import generate_round_robin, assign_dates, reschedule_game, resolve_ground_conflicts
 import google.generativeai as genai
 from dotenv import load_dotenv
 import os
