@@ -183,6 +183,42 @@ def export_to_csv(schedule, filename="fixtures.csv"):
             writer.writerow([game[0].strftime("%d/%m/%Y"), game[1], game[2]])
     print(f"\nSchedule exported to {filename}")
 
+def reschedule_game(schedule, home_team, away_team, new_date):
+    updated_schedule = []
+    rescheduled = False
+
+    for game in schedule:
+        if game[1].lower() == home_team.lower() and game[2].lower() == away_team.lower():
+            updated_schedule.append((new_date, game[1], game[2]))
+            rescheduled = True
+        else:
+            updated_schedule.append(game)
+
+    updated_schedule.sort(key=lambda x: x[0])
+    return updated_schedule, rescheduled
+
+
+def resolve_ground_conflicts(schedule, ground_assignments):
+    updated_schedule = list(schedule)
+    dates = sorted(set(game[0] for game in updated_schedule))
+
+    for match_date in dates:
+        games_on_date = [g for g in updated_schedule if g[0] == match_date]
+        grounds_used = {}
+
+        for game in games_on_date:
+            home_team = game[1]
+            ground = ground_assignments.get(home_team)
+            if ground:
+                if ground in grounds_used:
+                    idx = updated_schedule.index(game)
+                    next_date = match_date + timedelta(days=7)
+                    updated_schedule[idx] = (next_date, game[1], game[2])
+                else:
+                    grounds_used[ground] = home_team
+
+    updated_schedule.sort(key=lambda x: x[0])
+    return updated_schedule
 
 # -------------------------------
 # MAIN
