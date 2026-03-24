@@ -1,6 +1,6 @@
 import streamlit as st
 from datetime import date
-from scheduler import generate_round_robin, assign_dates, reschedule_game, resolve_ground_conflicts
+from scheduler import generate_round_robin, adjust_schedule_with_ilp, assign_dates, reschedule_game, resolve_ground_conflicts
 import google.generativeai as genai
 from dotenv import load_dotenv
 import os
@@ -523,7 +523,10 @@ if generate:
             continue
 
         fixtures = generate_round_robin(teams)
-        rounds = group_into_rounds(fixtures, teams)
+
+        # 🔥 NEW: ILP adjustment
+        rounds = adjust_schedule_with_ilp(fixtures, teams)
+
         schedule = assign_dates(rounds, start_date, blackout_dates)
 
         leagues_data[league_name] = {"teams": teams, "schedule": schedule}
