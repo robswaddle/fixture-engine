@@ -40,113 +40,97 @@ def generate_round_robin(teams):
 # -------------------------------
 def adjust_schedule_with_ilp(rounds, teams):
     num_rounds = len(rounds)
-    matches = list(itertools.combinations(teams, 2))
 
-    def normalize(m):
-        return tuple(sorted(m))
-
-    # Map Berger baseline
-    berger_map = {}
-    for r, rnd in enumerate(rounds):
-        for (h, a) in rnd:
-            berger_map[(normalize((h, a)), r)] = (h, a)
+    # All possible directed matches
+    matches = [(i, j) for i in teams for j in teams if i != j]
 
     prob = pulp.LpProblem("FixtureAdjustment", pulp.LpMinimize)
 
-    # Decision variables
+    # Decision variable: team i plays at home vs j in round r
     x = pulp.LpVariable.dicts(
         "match",
         ((i, j, r) for (i, j) in matches for r in range(num_rounds)),
         cat="Binary"
     )
 
-    # Home indicator
-    home = pulp.LpVariable.dicts(
-        "home",
-        ((team, r) for team in teams for r in range(num_rounds)),
-        cat="Binary"
-    )
-
     # -------------------------------
-    # OBJECTIVE: stay close to Berger
+    # OBJECTIVE (optional: keep simple)
     # -------------------------------
-    prob += pulp.lpSum(
-        0 if berger_map.get((normalize((i, j)), r)) else 1 * x[(i, j, r)]
-        for (i, j) in matches
-        for r in range(num_rounds)
-    )
+    prob += 0
 
     # -------------------------------
     # CONSTRAINTS
     # -------------------------------
 
-    # Each pair plays once
-    for (i, j) in matches:
-        prob += pulp.lpSum(x[(i, j, r)] for r in range(num_rounds)) == 1
+    # 1️⃣ Each pair plays exactly once
+    for i in teams:
+        for j in teams:
+            if i < j:
+                prob += pulp.lpSum(
+                    x[(i, j, r)] + x[(j, i, r)]
+                    for r in range(num_rounds)
+                ) == 1
 
-    # Each team plays once per round
+    # 2️⃣ Each team plays exactly once per round
     for team in teams:
         for r in range(num_rounds):
             prob += pulp.lpSum(
-                x[(i, j, r)]
-                for (i, j) in matches
-                if i == team or j == team
+                x[(team, opp, r)] + x[(opp, team, r)]
+                for opp in teams if opp != team
             ) == 1
 
-    # Link match → home variable
-    for r in range(num_rounds):
-        for team in teams:
-            prob += home[(team, r)] == pulp.lpSum(
-                x[(i, j, r)] if i == team else 0
-                for (i, j) in matches
-            )
-
     # -------------------------------
-    # 1️⃣ HOME/AWAY BALANCING
+    # 3️⃣ HOME/AWAY BALANCE
     # -------------------------------
-    total_games = len(teams) - 1  # single round robin
+    total_games = len(teams) - 1
     min_home = total_games // 2
     max_home = min_home + 1
 
     for team in teams:
-        prob += pulp.lpSum(home[(team, r)] for r in range(num_rounds)) >= min_home
-        prob += pulp.lpSum(home[(team, r)] for r in range(num_rounds)) <= max_home
+        prob += pulp.lpSum(
+            x[(team, opp, r)]
+            for opp in teams if opp != team
+            for r in range(num_rounds)
+        ) >= min_home
+
+        prob += pulp.lpSum(
+            x[(team, opp, r)]
+            for opp in teams if opp != team
+            for r in range(num_rounds)
+        ) <= max_home
 
     # -------------------------------
-    # 2️⃣ NO 3 CONSECUTIVE HOME/AWAY
+    # 4️⃣ NO 3 CONSECUTIVE HOME/AWAY
     # -------------------------------
     for team in teams:
         for r in range(num_rounds - 2):
-            # No 3 home in a row
-            prob += (
-                home[(team, r)] +
-                home[(team, r + 1)] +
-                home[(team, r + 2)]
+
+            # Home streak
+            prob += pulp.lpSum(
+                x[(team, opp, rr)]
+                for opp in teams if opp != team
+                for rr in [r, r+1, r+2]
             ) <= 2
 
-            # No 3 away in a row
-            prob += (
-                (1 - home[(team, r)]) +
-                (1 - home[(team, r + 1)]) +
-                (1 - home[(team, r + 2)])
+            # Away streak
+            prob += pulp.lpSum(
+                x[(opp, team, rr)]
+                for opp in teams if opp != team
+                for rr in [r, r+1, r+2]
             ) <= 2
 
     # Solve
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
 
     # -------------------------------
-    # BUILD NEW SCHEDULE
+    # BUILD SCHEDULE
     # -------------------------------
     new_rounds = [[] for _ in range(num_rounds)]
 
     for (i, j) in matches:
         for r in range(num_rounds):
             if pulp.value(x[(i, j, r)]) == 1:
-                # Assign home/away based on variable
-                if pulp.value(home[(i, r)]) == 1:
-                    new_rounds[r].append((i, j))
-                else:
-                    new_rounds[r].append((j, i))
+                new_rounds[r].append((i, j))
 
     return new_rounds
 
