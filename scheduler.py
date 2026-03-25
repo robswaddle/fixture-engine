@@ -71,7 +71,6 @@ def solve_cluster(
         processed_leagues.append({"name": lg["name"], "teams": teams})
 
     match_vars = {}
-    # We define max rounds based on the largest league in this specific cluster
     max_cluster_rounds = max(2 * (len(lg["teams"]) - 1) for lg in processed_leagues)
 
     for lg in processed_leagues:
@@ -80,14 +79,12 @@ def solve_cluster(
         R = 2 * (n_teams - 1)
         match_vars[name] = {}
         
-        # Create variables for this league
         for r in range(R):
             match_vars[name][r] = {
                 (i, j): model.NewBoolVar(f"{name}_r{r}_t{i}v{j}")
                 for i in range(n_teams) for j in range(n_teams) if i != j
             }
 
-        # --- ALL LEAGUE CONSTRAINTS MUST BE INSIDE THIS LOOP ---
         # C1: Each pair plays exactly once (i hosts j)
         for i in range(n_teams):
             for j in range(n_teams):
@@ -101,9 +98,10 @@ def solve_cluster(
                           [match_vars[name][r][(j, i)] for j in range(n_teams) if i != j]
                 model.AddExactlyOne(matches)
 
-        # C3: Max consecutive Home/Away (ignore BYE teams)
+        # C3: Home/Away Streak Constraint (Using the current ladder step)
         for i in range(n_teams):
             if teams[i] == "BYE": continue
+            # If max_consecutive is 2, we limit blocks of 3. If 3, we limit blocks of 4.
             for start_r in range(R - max_consecutive):
                 home_block = [match_vars[name][r][(i, j)] for r in range(start_r, start_r + max_consecutive + 1) for j in range(n_teams) if i != j]
                 away_block = [match_vars[name][r][(j, i)] for r in range(start_r, start_r + max_consecutive + 1) for j in range(n_teams) if i != j]
@@ -122,12 +120,10 @@ def solve_cluster(
         for r in range(max_cluster_rounds):
             home_indicators = []
             for div_name, t_idx in occupants:
-                # Check if this league even has a round 'r'
                 if div_name in match_vars and r in match_vars[div_name]:
                     div_teams = next(l["teams"] for l in processed_leagues if l["name"] == div_name)
                     n_div = len(div_teams)
                     home_indicators.extend([match_vars[div_name][r][(t_idx, j)] for j in range(n_div) if t_idx != j])
-            
             if len(home_indicators) > 1:
                 model.Add(sum(home_indicators) <= 1)
 
@@ -150,7 +146,7 @@ def solve_cluster(
         results[name] = entries
     return results
 
-# -- 4. Orchestrator --
+# -- 4. Orchestrator with Constraint Ladder --
 def schedule_leagues_or_tools(
     leagues: list,
     start_date: date,
@@ -161,7 +157,6 @@ def schedule_leagues_or_tools(
 ) -> dict:
     clusters = find_clusters(leagues, ground_assignments)
     
-    # Calculate max possible rounds needed across the whole season
     max_total_rounds = 0
     for lg in leagues:
         n = len(lg["teams"])
@@ -174,20 +169,33 @@ def schedule_leagues_or_tools(
     time_per_cluster = time_limit_seconds // len(clusters) if clusters else time_limit_seconds
 
     for cluster in clusters:
+        cluster_names = [l['name'] for l in cluster]
+        
+        # STEP 1: Try with Ideal Constraints (max_consecutive=2)
+        print(f"Solving cluster {cluster_names} with max_consecutive=2...")
         cluster_result = solve_cluster(
             cluster, date_slots, ground_assignments, 
-            time_per_cluster, max_consecutive
+            time_per_cluster // 2, 2
         )
         
-        # If too tight, try relaxing once to max_consecutive 3
+        # STEP 2: Relaxation - If Step 1 failed, try max_consecutive=3
         if cluster_result is None:
+            print(f"Relaxing cluster {cluster_names} to max_consecutive=3...")
             cluster_result = solve_cluster(
                 cluster, date_slots, ground_assignments, 
-                time_per_cluster, 3
+                time_per_cluster // 2, 3
+            )
+            
+        # STEP 3: Final Relaxation - Try max_consecutive=4
+        if cluster_result is None:
+            print(f"Final relaxation for cluster {cluster_names} (max_consecutive=4)...")
+            cluster_result = solve_cluster(
+                cluster, date_slots, ground_assignments, 
+                time_per_cluster // 2, 4
             )
             
         if cluster_result is None:
-            raise RuntimeError(f"Infeasible cluster: {[l['name'] for l in cluster]}. Try removing ground constraints or adding more weeks.")
+            raise RuntimeError(f"Could not find a valid schedule for cluster: {cluster_names} even with relaxed constraints.")
             
         all_schedules.update(cluster_result)
 
