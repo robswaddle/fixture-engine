@@ -1,6 +1,6 @@
 import streamlit as st
 from datetime import date
-from scheduler import schedule_leagues_or_tools, reschedule_game
+from scheduler import schedule_leagues_or_tools
 import google.generativeai as genai
 from dotenv import load_dotenv
 import os
@@ -21,270 +21,45 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif;
-    color: #1A1A2E;
-}
-
-.stApp {
-    background-color: #F7F8FA;
-}
-
-header[data-testid="stHeader"] {
-    background-color: #FFFFFF;
-    border-bottom: 1px solid #E8ECF0;
-}
-
-h1, h2, h3 {
-    font-family: 'Outfit', sans-serif;
-    font-weight: 600;
-}
-
-.main-header {
-    background: #FFFFFF;
-    padding: 2rem 2.5rem 1.5rem 2.5rem;
-    border-bottom: 1px solid #E8ECF0;
-    margin: -1rem -1rem 2rem -1rem;
-}
-
-.main-header h1 {
-    font-family: 'Outfit', sans-serif;
-    font-size: 1.8rem;
-    font-weight: 700;
-    color: #1A1A2E;
-    margin: 0;
-    letter-spacing: -0.5px;
-}
-
-.main-header p {
-    color: #6B7280;
-    font-size: 0.9rem;
-    margin: 0.3rem 0 0 0;
-    font-weight: 300;
-}
-
+html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; color: #1A1A2E; }
+.stApp { background-color: #F7F8FA; }
+header[data-testid="stHeader"] { background-color: #FFFFFF; border-bottom: 1px solid #E8ECF0; }
+h1, h2, h3 { font-family: 'Outfit', sans-serif; font-weight: 600; }
+.main-header { background: #FFFFFF; padding: 2rem 2.5rem 1.5rem 2.5rem; border-bottom: 1px solid #E8ECF0; margin: -1rem -1rem 2rem -1rem; }
+.main-header h1 { font-family: 'Outfit', sans-serif; font-size: 1.8rem; font-weight: 700; color: #1A1A2E; margin: 0; letter-spacing: -0.5px; }
+.main-header p { color: #6B7280; font-size: 0.9rem; margin: 0.3rem 0 0 0; font-weight: 300; }
 .accent { color: #1B4332; }
-
-.card {
-    background: #FFFFFF;
-    border: 1px solid #E8ECF0;
-    border-radius: 12px;
-    padding: 1.5rem;
-    margin-bottom: 1rem;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-}
-
-.league-header {
-    font-family: 'Outfit', sans-serif;
-    font-size: 1rem;
-    font-weight: 700;
-    color: #1B4332;
-    margin: 1.5rem 0 0.75rem 0;
-    padding-bottom: 0.5rem;
-    border-bottom: 2px solid #1B4332;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.round-header {
-    font-family: 'Outfit', sans-serif;
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
-    color: #1B4332;
-    margin-bottom: 0.75rem;
-    padding-bottom: 0.75rem;
-    border-bottom: 1px solid #E8ECF0;
-}
-
-.fixture-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.6rem 0;
-    border-bottom: 1px solid #F3F4F6;
-}
-
-.fixture-row:last-child {
-    border-bottom: none;
-    padding-bottom: 0;
-}
-
-.team-name {
-    font-weight: 500;
-    font-size: 0.95rem;
-    color: #1A1A2E;
-    flex: 1;
-}
-
+.card { background: #FFFFFF; border: 1px solid #E8ECF0; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+.league-header { font-family: 'Outfit', sans-serif; font-size: 1rem; font-weight: 700; color: #1B4332; margin: 1.5rem 0 0.75rem 0; padding-bottom: 0.5rem; border-bottom: 2px solid #1B4332; display: flex; align-items: center; gap: 0.5rem; }
+.round-header { font-family: 'Outfit', sans-serif; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1.2px; color: #1B4332; margin-bottom: 0.75rem; padding-bottom: 0.75rem; border-bottom: 1px solid #E8ECF0; }
+.fixture-row { display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 0; border-bottom: 1px solid #F3F4F6; }
+.fixture-row:last-child { border-bottom: none; padding-bottom: 0; }
+.team-name { font-weight: 500; font-size: 0.95rem; color: #1A1A2E; flex: 1; }
 .team-name.away { text-align: right; }
-
-.vs-badge {
-    background: #F3F4F6;
-    color: #6B7280;
-    font-size: 0.7rem;
-    font-weight: 600;
-    padding: 0.2rem 0.6rem;
-    border-radius: 20px;
-    margin: 0 1rem;
-    letter-spacing: 0.5px;
-}
-
-.metric-card {
-    background: #FFFFFF;
-    border: 1px solid #E8ECF0;
-    border-radius: 12px;
-    padding: 1.2rem 1.5rem;
-    text-align: center;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-}
-
-.metric-value {
-    font-family: 'Outfit', sans-serif;
-    font-size: 2rem;
-    font-weight: 700;
-    color: #1B4332;
-    line-height: 1;
-}
-
-.metric-label {
-    font-size: 0.8rem;
-    color: #6B7280;
-    margin-top: 0.3rem;
-    font-weight: 400;
-}
-
-.balance-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.6rem 0;
-    border-bottom: 1px solid #F3F4F6;
-    font-size: 0.9rem;
-}
-
+.vs-badge { background: #F3F4F6; color: #6B7280; font-size: 0.7rem; font-weight: 600; padding: 0.2rem 0.6rem; border-radius: 20px; margin: 0 1rem; letter-spacing: 0.5px; }
+.metric-card { background: #FFFFFF; border: 1px solid #E8ECF0; border-radius: 12px; padding: 1.2rem 1.5rem; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+.metric-value { font-family: 'Outfit', sans-serif; font-size: 2rem; font-weight: 700; color: #1B4332; line-height: 1; }
+.metric-label { font-size: 0.8rem; color: #6B7280; margin-top: 0.3rem; font-weight: 400; }
+.balance-row { display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 0; border-bottom: 1px solid #F3F4F6; font-size: 0.9rem; }
 .balance-row:last-child { border-bottom: none; }
-
 .balance-team { font-weight: 500; color: #1A1A2E; }
 .balance-stats { color: #6B7280; font-size: 0.85rem; }
-
-.balance-pill {
-    background: #D1FAE5;
-    color: #1B4332;
-    font-size: 0.75rem;
-    font-weight: 600;
-    padding: 0.15rem 0.6rem;
-    border-radius: 20px;
-}
-
-.balance-league-label {
-    font-family: 'Outfit', sans-serif;
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: #9CA3AF;
-    padding: 0.4rem 0 0.2rem 0;
-}
-
-.section-title {
-    font-family: 'Outfit', sans-serif;
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: #1A1A2E;
-    margin-bottom: 1rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.stButton > button {
-    background-color: #1B4332 !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 8px !important;
-    padding: 0.6rem 1.5rem !important;
-    font-family: 'Outfit', sans-serif !important;
-    font-weight: 500 !important;
-    font-size: 0.9rem !important;
-    letter-spacing: 0.3px !important;
-    transition: all 0.2s ease !important;
-    width: 100% !important;
-}
-
-.stButton > button:hover {
-    background-color: #2D6A4F !important;
-    box-shadow: 0 4px 12px rgba(27,67,50,0.25) !important;
-}
-
-.stTextArea textarea, .stDateInput input, .stTextInput input {
-    border-radius: 8px !important;
-    border-color: #E8ECF0 !important;
-    font-family: 'DM Sans', sans-serif !important;
-    font-size: 0.9rem !important;
-}
-
-.stTextArea textarea:focus, .stDateInput input:focus, .stTextInput input:focus {
-    border-color: #1B4332 !important;
-    box-shadow: 0 0 0 2px rgba(27,67,50,0.1) !important;
-}
-
-label {
-    font-family: 'DM Sans', sans-serif !important;
-    font-weight: 500 !important;
-    font-size: 0.85rem !important;
-    color: #374151 !important;
-}
-
-.stChatMessage {
-    background: #FFFFFF !important;
-    border: 1px solid #E8ECF0 !important;
-    border-radius: 12px !important;
-}
-
-.empty-state {
-    text-align: center;
-    padding: 3rem;
-    color: #9CA3AF;
-}
-
-.empty-state h3 {
-    font-family: 'Outfit', sans-serif;
-    font-size: 1rem;
-    font-weight: 500;
-    color: #6B7280;
-    margin-bottom: 0.5rem;
-}
-
-.empty-state p {
-    font-size: 0.85rem;
-    font-weight: 300;
-}
-
-div[data-testid="stSidebar"] {
-    background-color: #FFFFFF;
-    border-right: 1px solid #E8ECF0;
-}
-
+.balance-pill { background: #D1FAE5; color: #1B4332; font-size: 0.75rem; font-weight: 600; padding: 0.15rem 0.6rem; border-radius: 20px; }
+.balance-league-label { font-family: 'Outfit', sans-serif; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #9CA3AF; padding: 0.4rem 0 0.2rem 0; }
+.section-title { font-family: 'Outfit', sans-serif; font-size: 1.1rem; font-weight: 600; color: #1A1A2E; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+.stButton > button { background-color: #1B4332 !important; color: white !important; border: none !important; border-radius: 8px !important; padding: 0.6rem 1.5rem !important; font-family: 'Outfit', sans-serif !important; font-weight: 500 !important; font-size: 0.9rem !important; letter-spacing: 0.3px !important; transition: all 0.2s ease !important; width: 100% !important; }
+.stButton > button:hover { background-color: #2D6A4F !important; box-shadow: 0 4px 12px rgba(27,67,50,0.25) !important; }
+.stTextArea textarea, .stDateInput input, .stTextInput input { border-radius: 8px !important; border-color: #E8ECF0 !important; font-family: 'DM Sans', sans-serif !important; font-size: 0.9rem !important; }
+.stTextArea textarea:focus, .stDateInput input:focus, .stTextInput input:focus { border-color: #1B4332 !important; box-shadow: 0 0 0 2px rgba(27,67,50,0.1) !important; }
+label { font-family: 'DM Sans', sans-serif !important; font-weight: 500 !important; font-size: 0.85rem !important; color: #374151 !important; }
+.stChatMessage { background: #FFFFFF !important; border: 1px solid #E8ECF0 !important; border-radius: 12px !important; }
+.empty-state { text-align: center; padding: 3rem; color: #9CA3AF; }
+.empty-state h3 { font-family: 'Outfit', sans-serif; font-size: 1rem; font-weight: 500; color: #6B7280; margin-bottom: 0.5rem; }
+.empty-state p { font-size: 0.85rem; font-weight: 300; }
+div[data-testid="stSidebar"] { background-color: #FFFFFF; border-right: 1px solid #E8ECF0; }
 .sidebar-section { margin-bottom: 1.5rem; }
-
-.sidebar-label {
-    font-family: 'Outfit', sans-serif;
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: #9CA3AF;
-    margin-bottom: 0.75rem;
-}
-
-.league-divider {
-    border: none;
-    border-top: 1px dashed #E8ECF0;
-    margin: 1rem 0;
-}
+.sidebar-label { font-family: 'Outfit', sans-serif; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #9CA3AF; margin-bottom: 0.75rem; }
+.league-divider { border: none; border-top: 1px dashed #E8ECF0; margin: 1rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -297,21 +72,7 @@ st.markdown("""
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def detect_shared_grounds(league_configs):
-    """Return a pre-filled string of team pairs that likely share a ground.
-
-    Two teams are flagged as sharing a ground when they share the same 'base
-    name' — i.e. after stripping common ordinal / team-type suffixes the
-    leading words match.  Examples that will match:
-      Newcastle 1st XI  ↔  Newcastle 2nd XI
-      Ashington CC 1sts ↔  Ashington CC 2nds
-    """
-    SUFFIXES = {
-        # Ordinal team markers only — never strip words that are part of a club name
-        "1st", "2nd", "3rd", "4th", "5th",
-        "xi", "xii",
-        "1sts", "2nds", "3rds", "4ths",
-        "a", "b", "c",
-    }
+    SUFFIXES = {"1st", "2nd", "3rd", "4th", "5th", "xi", "xii", "1sts", "2nds", "3rds", "4ths", "a", "b", "c"}
 
     def base_name(team: str) -> str:
         words = team.lower().split()
@@ -342,7 +103,16 @@ def detect_shared_grounds(league_configs):
 
     return "\n".join(pairs)
 
-
+def reschedule_game(schedule, home_team, away_team, new_date):
+    updated, rescheduled = [], False
+    for game in schedule:
+        if (game[1].lower() == home_team.lower() and game[2].lower() == away_team.lower()):
+            updated.append((new_date, game[1], game[2]))
+            rescheduled = True
+        else:
+            updated.append(game)
+    updated.sort(key=lambda x: x[0])
+    return updated, rescheduled
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -364,36 +134,17 @@ with st.sidebar:
 
     DEFAULT_LEAGUE_NAMES = ["Division 1", "Division 2"]
     DEFAULT_LEAGUE_TEAMS = [
-        (
-            "Burnmoor 1st XI\nSouth Northumberland 1st XI\nCastle Eden 1st XI\n"
-            "Felling 1st XI\nChester Le Street 1st XI\nHetton Lyons 1st XI\n"
-            "Burnopfield 1st XI\nNewcastle 1st XI\nAshington 1st XI\n"
-            "Shotley Bridge 1st XI\nBenwell Hill 1st XI\nSeaham Harbour 1st XI"
-        ),
-        (
-            "Felling 2nd XI\nNewcastle City CC 2nd XI\nChester Le Street 2nd XI\n"
-            "Ashington 2nd XI\nSouth Northumberland 2nd XI\nNewcastle 2nd XI\n"
-            "Tynemouth 2nd XI\nBenwell Hill 2nd XI\nTynedale 2nd XI\n"
-            "Hetton Lyons 2nd XI\nWhitburn 2nd XI\nCastle Eden 2nd XI"
-        ),
+        ("Burnmoor 1st XI\nSouth Northumberland 1st XI\nCastle Eden 1st XI\nFelling 1st XI\nChester Le Street 1st XI\nHetton Lyons 1st XI\nBurnopfield 1st XI\nNewcastle 1st XI\nAshington 1st XI\nShotley Bridge 1st XI\nBenwell Hill 1st XI\nSeaham Harbour 1st XI"),
+        ("Felling 2nd XI\nNewcastle City CC 2nd XI\nChester Le Street 2nd XI\nAshington 2nd XI\nSouth Northumberland 2nd XI\nNewcastle 2nd XI\nTynemouth 2nd XI\nBenwell Hill 2nd XI\nTynedale 2nd XI\nHetton Lyons 2nd XI\nWhitburn 2nd XI\nCastle Eden 2nd XI"),
     ]
 
     league_configs = []
     for i in range(int(num_leagues)):
         st.markdown(f'<hr class="league-divider">', unsafe_allow_html=True)
         default_name = DEFAULT_LEAGUE_NAMES[i] if i < len(DEFAULT_LEAGUE_NAMES) else f"Division {i + 1}"
-        league_name = st.text_input(
-            f"League {i + 1} name",
-            value=default_name,
-            key=f"league_name_{i}"
-        )
+        league_name = st.text_input(f"League {i + 1} name", value=default_name, key=f"league_name_{i}")
         default_teams = DEFAULT_LEAGUE_TEAMS[i] if i < len(DEFAULT_LEAGUE_TEAMS) else ""
-        teams_input = st.text_area(
-            f"Teams in {league_name} (one per line)",
-            value=default_teams,
-            height=140,
-            key=f"league_teams_{i}"
-        )
+        teams_input = st.text_area(f"Teams in {league_name} (one per line)", value=default_teams, height=140, key=f"league_teams_{i}")
         league_configs.append({"name": league_name, "teams_raw": teams_input})
 
     st.markdown("---")
@@ -438,40 +189,41 @@ if generate:
             except:
                 pass
 
-    leagues = []
+    formatted_leagues = []
     for cfg in league_configs:
-        league_name = cfg["name"]
         teams = [t.strip() for t in cfg["teams_raw"].split("\n") if t.strip()]
-        if len(teams) < 2:
-            st.warning(f"League '{league_name}' needs at least 2 teams — skipped.")
-            continue
-        leagues.append({"name": league_name, "teams": teams})
+        if len(teams) >= 2:
+            formatted_leagues.append({"name": cfg["name"], "teams": teams})
+        else:
+            st.warning(f"League '{cfg['name']}' needs at least 2 teams — skipped.")
 
-    if leagues:
-        with st.spinner("⚙️ Solving schedule with OR-Tools CP-SAT — this may take up to 60 seconds..."):
+    if formatted_leagues:
+        with st.spinner("🤖 Solving fixtures with AI... This might take a minute for complex constraints."):
             try:
+                # Call the new unified CP-SAT solver
                 result = schedule_leagues_or_tools(
-                    leagues,
-                    start_date,
-                    blackout_dates,
-                    ground_assignments if ground_conflict_enabled else {},
-                    time_limit_seconds=60,
+                    leagues=formatted_leagues,
+                    start_date=start_date,
+                    blackout_dates=blackout_dates,
+                    ground_assignments=ground_assignments if ground_conflict_enabled else {},
+                    time_limit_seconds=120,  # 2 minutes web UI limit
+                    max_consecutive=2
                 )
-                leagues_data = {
-                    lg["name"]: {
-                        "teams":    lg["teams"],
-                        "schedule": result["schedules"][lg["name"]],
+
+                leagues_data = {}
+                for lg in formatted_leagues:
+                    lname = lg["name"]
+                    leagues_data[lname] = {
+                        "teams": lg["teams"],
+                        "schedule": result["schedules"].get(lname, [])
                     }
-                    for lg in leagues
-                }
-                st.session_state.leagues_data       = leagues_data
+
+                st.session_state.leagues_data = leagues_data
                 st.session_state.ground_assignments = ground_assignments
-                st.session_state.remaining_conflicts = (
-                    result["conflicts"] if ground_conflict_enabled else []
-                )
+                st.session_state.remaining_conflicts = result.get("conflicts", [])
                 st.session_state.chat_history = []
             except Exception as e:
-                st.error(f"Scheduling failed: {e}")
+                st.error(f"Failed to generate schedule: {str(e)}")
 
 # ── Display ───────────────────────────────────────────────────────────────────
 if "leagues_data" in st.session_state and st.session_state.leagues_data:
@@ -479,7 +231,6 @@ if "leagues_data" in st.session_state and st.session_state.leagues_data:
 
     col1, col2 = st.columns([3, 2])
 
-    # ── Unresolvable conflict warning ────────────────────────────────────────
     conflicts = st.session_state.get("remaining_conflicts", [])
     if conflicts:
         with st.expander(f"⚠️ {len(conflicts)} unresolvable ground conflict{'s' if len(conflicts)>1 else ''} — click to review", expanded=False):
@@ -503,49 +254,25 @@ if "leagues_data" in st.session_state and st.session_state.leagues_data:
                 unsafe_allow_html=True,
             )
 
-    # ── Left column: schedules ────────────────────────────────────────────────
     with col1:
         st.markdown('<div class="section-title">📅 Season Schedule</div>', unsafe_allow_html=True)
-
         all_leagues = list(leagues_data.keys())
-
-        if len(all_leagues) == 1:
-            tabs = [None]   # no tabs needed for a single league
-        else:
-            tabs = st.tabs(all_leagues)
+        tabs = [None] if len(all_leagues) == 1 else st.tabs(all_leagues)
 
         def render_schedule(schedule):
-            current_date = None
-            round_number = 1
-            round_fixtures_html = ""
-            rounds_html = ""
-
+            current_date, round_number = None, 1
+            round_fixtures_html, rounds_html = "", ""
             for game in schedule:
                 if game[0] != current_date:
                     if round_fixtures_html:
-                        rounds_html += f"""
-                        <div class="card">
-                            <div class="round-header">Round {round_number - 1} &nbsp;·&nbsp; {current_date.strftime('%A %d %B %Y')}</div>
-                            {round_fixtures_html}
-                        </div>"""
+                        rounds_html += f'<div class="card"><div class="round-header">Round {round_number - 1} &nbsp;·&nbsp; {current_date.strftime("%A %d %B %Y")}</div>{round_fixtures_html}</div>'
                         round_fixtures_html = ""
                     current_date = game[0]
                     round_number += 1
-
-                round_fixtures_html += f"""
-                <div class="fixture-row">
-                    <span class="team-name">{game[1]}</span>
-                    <span class="vs-badge">VS</span>
-                    <span class="team-name away">{game[2]}</span>
-                </div>"""
+                round_fixtures_html += f'<div class="fixture-row"><span class="team-name">{game[1]}</span><span class="vs-badge">VS</span><span class="team-name away">{game[2]}</span></div>'
 
             if round_fixtures_html:
-                rounds_html += f"""
-                <div class="card">
-                    <div class="round-header">Round {round_number - 1} &nbsp;·&nbsp; {current_date.strftime('%A %d %B %Y')}</div>
-                    {round_fixtures_html}
-                </div>"""
-
+                rounds_html += f'<div class="card"><div class="round-header">Round {round_number - 1} &nbsp;·&nbsp; {current_date.strftime("%A %d %B %Y")}</div>{round_fixtures_html}</div>'
             st.markdown(rounds_html, unsafe_allow_html=True)
 
         if len(all_leagues) == 1:
@@ -555,9 +282,7 @@ if "leagues_data" in st.session_state and st.session_state.leagues_data:
                 with tab:
                     render_schedule(leagues_data[league_name]["schedule"])
 
-    # ── Right column: stats + chat ────────────────────────────────────────────
     with col2:
-        # Aggregate totals across all leagues
         all_schedules = [d["schedule"] for d in leagues_data.values()]
         flat_schedule = [game for sched in all_schedules for game in sched]
         total_rounds = sum(len(set(g[0] for g in d["schedule"])) for d in leagues_data.values())
@@ -575,146 +300,69 @@ if "leagues_data" in st.session_state and st.session_state.leagues_data:
             return output.getvalue()
 
         csv_data = generate_csv(st.session_state.leagues_data)
-        st.download_button(
-            label="⬇️ Download Fixtures CSV",
-            data=csv_data,
-            file_name="fixtures.csv",
-            mime="text/csv"
-        )
+        st.download_button(label="⬇️ Download Fixtures CSV", data=csv_data, file_name="fixtures.csv", mime="text/csv")
 
         st.markdown("<br>", unsafe_allow_html=True)
         m1, m2, m3 = st.columns(3)
-        with m1:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">{len(leagues_data)}</div>
-                <div class="metric-label">Leagues</div>
-            </div>""", unsafe_allow_html=True)
-        with m2:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">{total_rounds}</div>
-                <div class="metric-label">Rounds</div>
-            </div>""", unsafe_allow_html=True)
-        with m3:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">{total_fixtures}</div>
-                <div class="metric-label">Fixtures</div>
-            </div>""", unsafe_allow_html=True)
+        with m1: st.markdown(f'<div class="metric-card"><div class="metric-value">{len(leagues_data)}</div><div class="metric-label">Leagues</div></div>', unsafe_allow_html=True)
+        with m2: st.markdown(f'<div class="metric-card"><div class="metric-value">{total_rounds}</div><div class="metric-label">Rounds</div></div>', unsafe_allow_html=True)
+        with m3: st.markdown(f'<div class="metric-card"><div class="metric-value">{total_fixtures}</div><div class="metric-label">Fixtures</div></div>', unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-title">⚖️ Home / Away Balance</div>', unsafe_allow_html=True)
-
         pat_tab, bal_tab = st.tabs(["Pattern", "Summary"])
 
         with bal_tab:
             balance_html = '<div class="card">'
             for league_name, data in leagues_data.items():
-                if len(leagues_data) > 1:
-                    balance_html += f'<div class="balance-league-label">🏆 {league_name}</div>'
+                if len(leagues_data) > 1: balance_html += f'<div class="balance-league-label">🏆 {league_name}</div>'
                 for team in data["teams"]:
                     schedule = data["schedule"]
                     home = sum(1 for g in schedule if g[1] == team)
                     away = sum(1 for g in schedule if g[2] == team)
-                    balance_html += f"""
-                    <div class="balance-row">
-                        <span class="balance-team">{team}</span>
-                        <span class="balance-stats">{home}H &nbsp; {away}A</span>
-                        <span class="balance-pill">Balanced</span>
-                    </div>"""
+                    balance_html += f'<div class="balance-row"><span class="balance-team">{team}</span><span class="balance-stats">{home}H &nbsp; {away}A</span><span class="balance-pill">Balanced</span></div>'
             balance_html += "</div>"
             st.markdown(balance_html, unsafe_allow_html=True)
 
         with pat_tab:
-            # Build pattern: for each team, collect their fixtures in date order
-            # and mark each as H (home) or A (away)
             pattern_html = """
             <style>
             .pat-grid { display: flex; flex-direction: column; gap: 0.55rem; padding: 0.25rem 0; }
             .pat-row  { display: flex; align-items: center; gap: 0.5rem; }
-            .pat-name { font-size: 0.78rem; font-weight: 500; color: #1A1A2E;
-                        min-width: 130px; max-width: 130px; white-space: nowrap;
-                        overflow: hidden; text-overflow: ellipsis; }
+            .pat-name { font-size: 0.78rem; font-weight: 500; color: #1A1A2E; min-width: 130px; max-width: 130px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .pat-squares { display: flex; gap: 3px; flex-wrap: wrap; }
-            .sq {
-                width: 16px; height: 16px; border-radius: 3px;
-                display: inline-flex; align-items: center; justify-content: center;
-                font-size: 0.55rem; font-weight: 700; color: white;
-                cursor: default; flex-shrink: 0;
-            }
+            .sq { width: 16px; height: 16px; border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; font-size: 0.55rem; font-weight: 700; color: white; cursor: default; flex-shrink: 0; }
             .sq-h { background: #1B4332; }
             .sq-a { background: #D1FAE5; color: #1B4332; }
-            .pat-league-label {
-                font-family: 'Outfit', sans-serif;
-                font-size: 0.68rem; font-weight: 600;
-                text-transform: uppercase; letter-spacing: 1px;
-                color: #9CA3AF; padding: 0.6rem 0 0.2rem 0;
-            }
-            .pat-legend { display: flex; gap: 1rem; align-items: center;
-                          font-size: 0.75rem; color: #6B7280; margin-bottom: 0.75rem; }
+            .pat-league-label { font-family: 'Outfit', sans-serif; font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #9CA3AF; padding: 0.6rem 0 0.2rem 0; }
+            .pat-legend { display: flex; gap: 1rem; align-items: center; font-size: 0.75rem; color: #6B7280; margin-bottom: 0.75rem; }
             .pat-legend-item { display: flex; align-items: center; gap: 4px; }
             </style>
-            <div class="card">
-            <div class="pat-legend">
-                <div class="pat-legend-item">
-                    <div class="sq sq-h">H</div> Home
-                </div>
-                <div class="pat-legend-item">
-                    <div class="sq sq-a">A</div> Away
-                </div>
-            </div>
-            <div class="pat-grid">
+            <div class="card"><div class="pat-legend"><div class="pat-legend-item"><div class="sq sq-h">H</div> Home</div><div class="pat-legend-item"><div class="sq sq-a">A</div> Away</div></div><div class="pat-grid">
             """
-
-            all_dates = sorted(set(
-                g[0]
-                for data in leagues_data.values()
-                for g in data["schedule"]
-            ))
-            # Map date → round number (position in the sorted unique date list)
+            all_dates = sorted(set(g[0] for data in leagues_data.values() for g in data["schedule"]))
             date_to_round = {d: i + 1 for i, d in enumerate(all_dates)}
 
             for league_name, data in leagues_data.items():
-                if len(leagues_data) > 1:
-                    pattern_html += f'<div class="pat-league-label">🏆 {league_name}</div>'
-
-                league_dates = sorted(set(g[0] for g in data["schedule"]))
-
+                if len(leagues_data) > 1: pattern_html += f'<div class="pat-league-label">🏆 {league_name}</div>'
                 for team in data["teams"]:
-                    team_games = sorted(
-                        [g for g in data["schedule"] if g[1] == team or g[2] == team],
-                        key=lambda g: g[0]
-                    )
+                    team_games = sorted([g for g in data["schedule"] if g[1] == team or g[2] == team], key=lambda g: g[0])
                     squares = ""
                     for game in team_games:
                         rnd = date_to_round[game[0]]
-                        label = "H" if game[1] == team else "A"
-                        css   = "sq-h" if label == "H" else "sq-a"
-                        tip   = f"Rd {rnd} · {game[0].strftime('%d %b')} · {'Home' if label == 'H' else 'Away'}"
+                        label, css = ("H", "sq-h") if game[1] == team else ("A", "sq-a")
+                        tip = f"Rd {rnd} · {game[0].strftime('%d %b')} · {'Home' if label == 'H' else 'Away'}"
                         squares += f'<div class="sq {css}" title="{tip}">{label}</div>'
-
-                    pattern_html += f"""
-                    <div class="pat-row">
-                        <span class="pat-name" title="{team}">{team}</span>
-                        <div class="pat-squares">{squares}</div>
-                    </div>"""
-
+                    pattern_html += f'<div class="pat-row"><span class="pat-name" title="{team}">{team}</span><div class="pat-squares">{squares}</div></div>'
             pattern_html += "</div></div>"
             st.markdown(pattern_html, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-title">🤖 Fixture Assistant</div>', unsafe_allow_html=True)
 
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
-
+        if "chat_history" not in st.session_state: st.session_state.chat_history = []
         if not st.session_state.chat_history:
-            st.markdown("""
-            <div class="card empty-state">
-                <h3>Ask me anything</h3>
-                <p>Try "Show me Ashington CC's fixtures" or "Which teams play on 5th April?"</p>
-            </div>""", unsafe_allow_html=True)
+            st.markdown('<div class="card empty-state"><h3>Ask me anything</h3><p>Try "Show me Ashington CC\'s fixtures" or "Which teams play on 5th April?"</p></div>', unsafe_allow_html=True)
 
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
@@ -724,12 +372,7 @@ if "leagues_data" in st.session_state and st.session_state.leagues_data:
 
         if user_input:
             st.session_state.chat_history.append({"role": "user", "content": user_input})
-
-            schedule_text = "\n".join(
-                f"[{league_name}] {game[0].strftime('%d/%m/%Y')} — {game[1]} vs {game[2]}"
-                for league_name, data in leagues_data.items()
-                for game in data["schedule"]
-            )
+            schedule_text = "\n".join(f"[{league_name}] {game[0].strftime('%d/%m/%Y')} — {game[1]} vs {game[2]}" for league_name, data in leagues_data.items() for game in data["schedule"])
 
             prompt = f"""You are a cricket fixture scheduling assistant managing multiple leagues.
 Here is the current fixture schedule:
@@ -745,25 +388,17 @@ Do not return JSON for questions, only for reschedule requests."""
 
             response = model.generate_content(prompt)
             reply = response.text.strip()
-
             import json
-
             try:
                 clean = reply.replace("```json", "").replace("```", "").strip()
                 data = json.loads(clean)
-
                 if data.get("action") == "reschedule":
                     day, month, year = data["new_date"].split("/")
                     new_date = date(int(year), int(month), int(day))
                     league_name = data.get("league", list(leagues_data.keys())[0])
 
                     if league_name in st.session_state.leagues_data:
-                        updated_schedule, success = reschedule_game(
-                            st.session_state.leagues_data[league_name]["schedule"],
-                            data["home_team"],
-                            data["away_team"],
-                            new_date
-                        )
+                        updated_schedule, success = reschedule_game(st.session_state.leagues_data[league_name]["schedule"], data["home_team"], data["away_team"], new_date)
                         if success:
                             st.session_state.leagues_data[league_name]["schedule"] = updated_schedule
                             reply = f"Done — {data['home_team']} vs {data['away_team']} ({league_name}) moved to {data['new_date']}."
@@ -771,8 +406,7 @@ Do not return JSON for questions, only for reschedule requests."""
                             reply = f"I couldn't find that fixture in {league_name}. Please check the team names and try again."
                     else:
                         reply = f"I couldn't identify the league '{league_name}'. Please try again."
-            except:
-                pass
+            except: pass
 
             st.session_state.chat_history.append({"role": "assistant", "content": reply})
             st.rerun()
