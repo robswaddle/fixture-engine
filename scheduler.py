@@ -1,324 +1,397 @@
+"""
+Fixture Scheduling Engine — Double Round-Robin + OR-Tools CP-SAT
+================================================================
+Pipeline (per the design document):
+  1. generate_double_round_robin()   — pure structure, no dates assigned
+  2. schedule_leagues_or_tools()     — CP-SAT assigns rounds to dates
+
+Constraints
+-----------
+  C1  Each round on exactly one date                         (hard)
+  C2  At most one round per league per date                  (hard)
+  C4  No team plays more than 2 consecutive home or away     (hard)
+  C3  Shared-venue teams cannot both be home same date       (soft - minimised)
+
+Full rounds and streak-balance are guaranteed.
+Ground conflicts are minimised; any unavoidable residual ones are
+returned alongside the schedule so the caller can surface them.
+"""
+
 from datetime import date, timedelta
+from collections import defaultdict
 import csv
 
 
-def generate_round_robin(teams):
-    """Return a balanced list of rounds using the circle/polygon algorithm.
+# ── 1. Double Round-Robin Generator ─────────────────────────────────────────
 
-    Rounds are interleaved (first-half round 1, second-half round 1, etc.)
-    so that home/away alternates as evenly as possible — no team will ever
-    have more than 2 consecutive home or away games.
+def generate_double_round_robin(teams: list) -> list:
+    """Return all matches for a double round-robin using the circle method.
 
-    Every round is guaranteed to be full (n//2 fixtures).
+    Returns a list of match dicts:
+        {"id": int, "home": str, "away": str, "round": int}
+
+    Total rounds = 2 * (n-1).  Every round has exactly n//2 fixtures.
+    Second half is the home/away inverse of the first half.
     """
     team_list = list(teams)
     if len(team_list) % 2 == 1:
         team_list.append("BYE")
 
     n = len(team_list)
-    first_half = []
+    matches, match_id, first_half = [], 0, []
 
-    for _ in range(n - 1):
+    for round_idx in range(n - 1):
         rnd = []
         for i in range(n // 2):
-            home = team_list[i]
-            away = team_list[n - 1 - i]
+            home, away = team_list[i], team_list[n - 1 - i]
             if home != "BYE" and away != "BYE":
-                rnd.append((home, away))
+                m = {"id": match_id, "home": home, "away": away, "round": round_idx}
+                matches.append(m)
+                rnd.append(m)
+                match_id += 1
         first_half.append(rnd)
         team_list = [team_list[0]] + [team_list[-1]] + team_list[1:-1]
 
-    second_half = [[(away, home) for home, away in rnd] for rnd in first_half]
+    offset = n - 1
+    for r_idx, rnd in enumerate(first_half):
+        for m in rnd:
+            matches.append({
+                "id":    match_id,
+                "home":  m["away"],
+                "away":  m["home"],
+                "round": r_idx + offset,
+            })
+            match_id += 1
 
-    # Interleave first and second halves so H/A alternates cleanly
-    interleaved = []
-    for f, s in zip(first_half, second_half):
-        interleaved.append(f)
-        interleaved.append(s)
-    return interleaved
+    return matches
 
+
+# ── 2. OR-Tools CP-SAT Scheduler ────────────────────────────────────────────
+
+def schedule_leagues_or_tools(
+    leagues: list,
+    start_date,
+    blackout_dates: list = [],
+    ground_assignments: dict = {},
+    time_limit_seconds: int = 60,
+) -> dict:
+    """Assign rounds to dates across multiple leagues using CP-SAT.
+
+    Parameters
+    ----------
+    leagues            : list of {"name": str, "teams": list[str]}
+    start_date         : datetime.date
+    blackout_dates     : list of datetime.date  -- weeks to skip
+    ground_assignments : dict  team_name -> venue_name
+    time_limit_seconds : int
+
+    Returns
+    -------
+    dict {
+        "schedules":  {league_name: [(date, home, away), ...]},
+        "conflicts":  [{"date", "ground", "team1", "league1",
+                        "team2", "league2"}, ...]
+    }
+    """
+    from ortools.sat.python import cp_model
+
+    # Step 1: Generate all matches
+    all_matches, league_num_rounds = [], {}
+    match_id = 0
+    for li, league in enumerate(leagues):
+        raw    = generate_double_round_robin(league["teams"])
+        n_rnds = max(m["round"] for m in raw) + 1
+        league_num_rounds[league["name"]] = n_rnds
+        for m in raw:
+            all_matches.append({**m, "id": match_id,
+                                 "league": league["name"], "league_idx": li})
+            match_id += 1
+
+    # Step 2: Build exactly max_rounds non-blackout date slots.
+    # Providing exactly this many slots forces every slot to be used so
+    # consecutive slot index == consecutive game -- required for C4.
+    blackout_set = set(blackout_dates)
+    max_rounds   = max(league_num_rounds.values())
+    slots, d     = [], start_date
+    while len(slots) < max_rounds:
+        if d not in blackout_set:
+            slots.append(d)
+        d += timedelta(days=7)
+    ND = len(slots)
+
+    # Step 3: Precompute lookup tables
+    round_home_teams = defaultdict(list)
+    for m in all_matches:
+        round_home_teams[(m["league"], m["round"])].append(m["home"])
+
+    ground_to_teams = defaultdict(list)
+    for team, venue in ground_assignments.items():
+        if team not in ground_to_teams[venue]:
+            ground_to_teams[venue].append(team)
+    shared_groups = {v: t for v, t in ground_to_teams.items() if len(t) >= 2}
+
+    team_home_rounds = defaultdict(list)
+    team_away_rounds = defaultdict(list)
+    for m in all_matches:
+        team_home_rounds[m["home"]].append((m["league"], m["round"]))
+        team_away_rounds[m["away"]].append((m["league"], m["round"]))
+
+    all_team_list = [t for lg in leagues for t in lg["teams"]]
+
+    # Step 4: Build CP-SAT model
+    model = cp_model.CpModel()
+
+    # Decision variables: y[(league, round, date_idx)] in {0, 1}
+    y = {}
+    for league in leagues:
+        name = league["name"]
+        for r in range(league_num_rounds[name]):
+            for di in range(ND):
+                y[(name, r, di)] = model.NewBoolVar(f"y_{name}_{r}_{di}")
+
+    # C1 -- Each round assigned to exactly one date
+    for league in leagues:
+        name = league["name"]
+        for r in range(league_num_rounds[name]):
+            model.AddExactlyOne(y[(name, r, di)] for di in range(ND))
+
+    # C2 -- At most one round per league per date (guarantees full rounds)
+    for league in leagues:
+        name = league["name"]
+        for di in range(ND):
+            model.AddAtMostOne(y[(name, r, di)] for r in range(league_num_rounds[name]))
+
+    # C4 -- Streak constraint (HARD): no team plays 3+ consecutive home or away.
+    # Correct because all slots are used with no gaps, so slot index == game position.
+    for team in all_team_list:
+        h_rounds = team_home_rounds[team]
+        a_rounds = team_away_rounds[team]
+        for di in range(ND - 2):
+            model.Add(sum(
+                y[(lg, r, di)] + y[(lg, r, di+1)] + y[(lg, r, di+2)]
+                for lg, r in h_rounds
+            ) <= 2)
+            model.Add(sum(
+                y[(lg, r, di)] + y[(lg, r, di+1)] + y[(lg, r, di+2)]
+                for lg, r in a_rounds
+            ) <= 2)
+
+    # C3 -- Shared-venue constraint (SOFT): minimised in objective.
+    # Cannot always be fully satisfied alongside C4, so violations are
+    # minimised and surfaced as warnings rather than causing infeasibility.
+    conflict_vars = []
+    for venue, group_teams in shared_groups.items():
+        group_set = set(group_teams)
+        for di in range(ND):
+            terms = []
+            for league in leagues:
+                name = league["name"]
+                for r in range(league_num_rounds[name]):
+                    cnt = sum(1 for t in round_home_teams[(name, r)] if t in group_set)
+                    if cnt > 0:
+                        terms.append(y[(name, r, di)] * cnt)
+            if terms:
+                pv = model.NewBoolVar(f"conf_{venue}_{di}")
+                model.Add(sum(terms) - 1 <= len(terms) * pv)
+                conflict_vars.append(pv)
+
+    if conflict_vars:
+        model.Minimize(sum(conflict_vars))
+
+    # Step 5: Solve
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit_seconds
+    solver.parameters.num_workers         = 8
+    solver.parameters.log_search_progress = False
+
+    status = solver.Solve(model)
+
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        raise RuntimeError(
+            "OR-Tools could not find a feasible schedule. "
+            "Try adjusting blackout dates or team counts."
+        )
+
+    # Step 6: Extract schedule
+    round_to_date = {}
+    for league in leagues:
+        name = league["name"]
+        for r in range(league_num_rounds[name]):
+            for di in range(ND):
+                if solver.Value(y[(name, r, di)]) == 1:
+                    round_to_date[(name, r)] = slots[di]
+                    break
+
+    schedules = {league["name"]: [] for league in leagues}
+    for m in all_matches:
+        assigned = round_to_date[(m["league"], m["round"])]
+        schedules[m["league"]].append((assigned, m["home"], m["away"]))
+
+    for name in schedules:
+        schedules[name].sort(key=lambda g: g[0])
+
+    # Step 7: Detect residual ground conflicts
+    all_home_by_date = defaultdict(list)
+    for name, sched in schedules.items():
+        for d_game, home, away in sched:
+            all_home_by_date[d_game].append((home, name))
+
+    remaining_conflicts = []
+    for d_game, entries in sorted(all_home_by_date.items()):
+        seen_grounds = {}
+        for team, lg_name in entries:
+            g = ground_assignments.get(team)
+            if g:
+                if g in seen_grounds:
+                    remaining_conflicts.append({
+                        "date":    d_game,
+                        "ground":  g,
+                        "team1":   seen_grounds[g][0],
+                        "league1": seen_grounds[g][1],
+                        "team2":   team,
+                        "league2": lg_name,
+                    })
+                else:
+                    seen_grounds[g] = (team, lg_name)
+
+    return {"schedules": schedules, "conflicts": remaining_conflicts}
+
+
+# ── Legacy shims ──────────────────────────────────────────────────────────────
+
+def generate_round_robin(teams):
+    matches  = generate_double_round_robin(teams)
+    n_rounds = max(m["round"] for m in matches) + 1
+    rounds   = [[] for _ in range(n_rounds)]
+    for m in matches:
+        rounds[m["round"]].append((m["home"], m["away"]))
+    return rounds
 
 def group_into_rounds(fixtures, teams):
-    """Pass-through kept for backwards-compatibility.
-
-    generate_round_robin now returns fully balanced rounds directly.
-    """
     return fixtures
 
-
 def assign_dates(rounds, start_date, blackout_dates=[], interval_days=7):
-    """Single-league date assignment (used when ground sharing is off)."""
-    schedule = []
-    current_date = start_date
-
-    for round_fixtures in rounds:
-        while current_date in blackout_dates:
+    schedule, current_date = [], start_date
+    blackout_set = set(blackout_dates)
+    for rnd in rounds:
+        while current_date in blackout_set:
             current_date += timedelta(days=interval_days)
-        for fixture in round_fixtures:
-            schedule.append((current_date, fixture[0], fixture[1]))
+        for home, away in rnd:
+            schedule.append((current_date, home, away))
         current_date += timedelta(days=interval_days)
-
     return schedule
 
-
-def assign_dates_multi_league(leagues_rounds, start_date, blackout_dates=[],
-                               ground_assignments={}, interval_days=7):
-    """Assign dates to rounds across multiple leagues simultaneously.
-
-    Uses the linear assignment algorithm to find the globally optimal pairing
-    of rounds across leagues before touching dates, so full rounds are always
-    preserved and cross-league ground conflicts are minimised.
-
-    leagues_rounds : list of (league_name, rounds)
-    Returns        : dict {league_name: [(date, home, away), ...]}
-    """
-    from collections import defaultdict
-
-    def combo_conflicts(rounds_combo):
-        """Ground conflicts when these rounds all fall on the same date."""
-        home_teams = [home for rnd in rounds_combo for home, _ in rnd]
-        conflicts = 0
-        for i in range(len(home_teams)):
-            gi = ground_assignments.get(home_teams[i])
-            if not gi:
-                continue
-            for j in range(i + 1, len(home_teams)):
-                if ground_assignments.get(home_teams[j]) == gi:
-                    conflicts += 1
-        return conflicts
-
-    league_names = [name for name, _ in leagues_rounds]
-    all_rounds   = [list(rounds) for _, rounds in leagues_rounds]
-    n_leagues    = len(leagues_rounds)
-
-    # ── For exactly 2 leagues use the linear assignment algorithm ──────────
-    # Build a conflict cost matrix: cost[i][j] = conflicts if league-0 round i
-    # is paired with league-1 round j on the same date.  Then find the
-    # minimum-cost perfect assignment and order paired rounds chronologically.
-    if n_leagues == 2:
-        try:
-            import numpy as np
-            from scipy.optimize import linear_sum_assignment
-
-            r0, r1 = all_rounds[0], all_rounds[1]
-            n = max(len(r0), len(r1))
-
-            # Pad shorter list with empty rounds so the matrix is square
-            r0_padded = r0 + [[]] * (n - len(r0))
-            r1_padded = r1 + [[]] * (n - len(r1))
-
-            cost = np.zeros((n, n), dtype=int)
-            for i, rnd0 in enumerate(r0_padded):
-                for j, rnd1 in enumerate(r1_padded):
-                    cost[i, j] = combo_conflicts([rnd0, rnd1]) if rnd0 and rnd1 else 0
-
-            row_ind, col_ind = linear_sum_assignment(cost)
-
-            # Reorder both leagues' rounds according to the optimal assignment
-            ordered0 = [r0_padded[i] for i in row_ind if r0_padded[i]]
-            ordered1 = [r1_padded[col_ind[k]] for k, i in enumerate(row_ind)
-                        if r0_padded[i]]  # match ordering of ordered0
-            # Any r1 rounds that ended up paired with empty r0 slots go at the end
-            used1 = set(col_ind)
-            leftover1 = [r1_padded[j] for j in range(n)
-                         if j not in used1 and r1_padded[j]]
-            ordered1 += leftover1
-
-            paired = list(zip(ordered0, ordered1))
-            extra0 = ordered0[len(paired):]
-            extra1 = ordered1[len(paired):]
-
-            # Assign dates to paired rounds
-            schedules = {name: [] for name in league_names}
-            current_date = start_date
-            for rnd0, rnd1 in paired:
-                while current_date in blackout_dates:
-                    current_date += timedelta(days=interval_days)
-                for home, away in rnd0:
-                    schedules[league_names[0]].append((current_date, home, away))
-                for home, away in rnd1:
-                    schedules[league_names[1]].append((current_date, home, away))
-                current_date += timedelta(days=interval_days)
-            # Any leftover rounds (unequal league lengths) get tacked on
-            for rnd in extra0:
-                while current_date in blackout_dates:
-                    current_date += timedelta(days=interval_days)
-                for home, away in rnd:
-                    schedules[league_names[0]].append((current_date, home, away))
-                current_date += timedelta(days=interval_days)
-            for rnd in extra1:
-                while current_date in blackout_dates:
-                    current_date += timedelta(days=interval_days)
-                for home, away in rnd:
-                    schedules[league_names[1]].append((current_date, home, away))
-                current_date += timedelta(days=interval_days)
-            return schedules
-
-        except ImportError:
-            pass  # fall through to greedy below
-
-    # ── Greedy fallback for 3+ leagues (or if scipy not installed) ─────────
-    import itertools
-    remaining    = [list(rounds) for rounds in all_rounds]
-    schedules    = {name: [] for name in league_names}
-    current_date = start_date
-
-    while any(rem for rem in remaining):
-        while current_date in blackout_dates:
-            current_date += timedelta(days=interval_days)
-
-        active = [i for i in range(n_leagues) if remaining[i]]
-        best_combo_indices = None
-        best_score = float("inf")
-
-        if len(active) <= 3:
-            for idx_tuple in itertools.product(*[range(len(remaining[i])) for i in active]):
-                rounds_combo = [remaining[active[k]][idx_tuple[k]] for k in range(len(active))]
-                score = combo_conflicts(rounds_combo)
-                if score < best_score:
-                    best_score = score
-                    best_combo_indices = idx_tuple
-                if best_score == 0:
-                    break
+def reschedule_game(schedule, home_team, away_team, new_date):
+    updated, rescheduled = [], False
+    for game in schedule:
+        if (game[1].lower() == home_team.lower()
+                and game[2].lower() == away_team.lower()):
+            updated.append((new_date, game[1], game[2]))
+            rescheduled = True
         else:
-            chosen_rounds  = []
-            chosen_indices = []
-            for i in active:
-                best_idx   = 0
-                best_local = float("inf")
-                for idx, candidate in enumerate(remaining[i]):
-                    score = combo_conflicts(chosen_rounds + [candidate])
-                    if score < best_local:
-                        best_local = score
-                        best_idx   = idx
-                    if best_local == 0:
-                        break
-                chosen_rounds.append(remaining[i][best_idx])
-                chosen_indices.append(best_idx)
-            best_combo_indices = tuple(chosen_indices)
+            updated.append(game)
+    updated.sort(key=lambda x: x[0])
+    return updated, rescheduled
 
-        for k, i in enumerate(active):
-            chosen_round = remaining[i][best_combo_indices[k]]
-            for home, away in chosen_round:
-                schedules[league_names[i]].append((current_date, home, away))
-            remaining[i].remove(chosen_round)
+def resolve_ground_conflicts(schedule, ground_assignments):
+    updated = list(schedule)
+    for match_date in sorted(set(g[0] for g in updated)):
+        grounds_used = {}
+        for game in [g for g in updated if g[0] == match_date]:
+            ground = ground_assignments.get(game[1])
+            if ground:
+                if ground in grounds_used:
+                    idx = updated.index(game)
+                    updated[idx] = (match_date + timedelta(days=7), game[1], game[2])
+                else:
+                    grounds_used[ground] = game[1]
+    updated.sort(key=lambda x: x[0])
+    return updated
 
-        current_date += timedelta(days=interval_days)
 
-    return schedules
+# ── CLI helpers ───────────────────────────────────────────────────────────────
 
 def check_home_away_balance(schedule, teams):
-    print("\n--- Home/Away Balance Report ---")
+    print("\n--- Home/Away Balance ---")
     for team in teams:
-        home_games = sum(1 for game in schedule if game[1] == team)
-        away_games = sum(1 for game in schedule if game[2] == team)
-        print(f"{team}: {home_games} home, {away_games} away")
-
+        h = sum(1 for g in schedule if g[1] == team)
+        a = sum(1 for g in schedule if g[2] == team)
+        print(f"  {team}: {h}H {a}A")
 
 def print_schedule_by_round(schedule, teams):
-    print("\n--- Full Season Schedule ---")
-    current_date = None
-    round_number = 1
-
+    print("\n--- Schedule ---")
+    current_date, rn = None, 1
     for game in schedule:
         if game[0] != current_date:
             current_date = game[0]
-            print(f"\nRound {round_number} — {current_date.strftime('%A %d %B %Y')}")
-            round_number += 1
+            print(f"\nRound {rn} -- {current_date.strftime('%A %d %B %Y')}")
+            rn += 1
         print(f"  {game[1]} vs {game[2]}")
 
-
 def export_to_csv(schedule, filename="fixtures.csv"):
-    with open(filename, "w", newline="") as file:
-        writer = csv.writer(file)
+    with open(filename, "w", newline="") as f:
+        writer = csv.writer(f)
         writer.writerow(["Date", "Home Team", "Away Team"])
         for game in schedule:
             writer.writerow([game[0].strftime("%d/%m/%Y"), game[1], game[2]])
-    print(f"\nSchedule exported to {filename}")
+    print(f"Exported to {filename}")
 
 
-def reschedule_game(schedule, home_team, away_team, new_date):
-    updated_schedule = []
-    rescheduled = False
-
-    for game in schedule:
-        if game[1].lower() == home_team.lower() and game[2].lower() == away_team.lower():
-            updated_schedule.append((new_date, game[1], game[2]))
-            rescheduled = True
-        else:
-            updated_schedule.append(game)
-
-    updated_schedule.sort(key=lambda x: x[0])
-    return updated_schedule, rescheduled
-
-
-def resolve_ground_conflicts(schedule, ground_assignments):
-    updated_schedule = list(schedule)
-    dates = sorted(set(game[0] for game in updated_schedule))
-
-    for match_date in dates:
-        games_on_date = [g for g in updated_schedule if g[0] == match_date]
-        grounds_used = {}
-
-        for game in games_on_date:
-            home_team = game[1]
-            ground = ground_assignments.get(home_team)
-            if ground:
-                if ground in grounds_used:
-                    idx = updated_schedule.index(game)
-                    next_date = match_date + timedelta(days=7)
-                    updated_schedule[idx] = (next_date, game[1], game[2])
-                else:
-                    grounds_used[ground] = home_team
-
-    updated_schedule.sort(key=lambda x: x[0])
-    return updated_schedule
-
+# ── CLI entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     division_1 = [
-        "Burnmoor 1st XI",
-        "South Northumberland 1st XI",
-        "Castle Eden 1st XI",
-        "Felling 1st XI",
-        "Chester Le Street 1st XI",
-        "Hetton Lyons 1st XI",
-        "Burnopfield 1st XI",
-        "Newcastle 1st XI",
-        "Ashington 1st XI",
-        "Shotley Bridge 1st XI",
-        "Benwell Hill 1st XI",
-        "Seaham Harbour 1st XI",
+        "Burnmoor 1st XI", "South Northumberland 1st XI", "Castle Eden 1st XI",
+        "Felling 1st XI", "Chester Le Street 1st XI", "Hetton Lyons 1st XI",
+        "Burnopfield 1st XI", "Newcastle 1st XI", "Ashington 1st XI",
+        "Shotley Bridge 1st XI", "Benwell Hill 1st XI", "Seaham Harbour 1st XI",
     ]
-
     division_2 = [
-        "Felling 2nd XI",
-        "Newcastle City CC 2nd XI",
-        "Chester Le Street 2nd XI",
-        "Ashington 2nd XI",
-        "South Northumberland 2nd XI",
-        "Newcastle 2nd XI",
-        "Tynemouth 2nd XI",
-        "Benwell Hill 2nd XI",
-        "Tynedale 2nd XI",
-        "Hetton Lyons 2nd XI",
-        "Whitburn 2nd XI",
-        "Castle Eden 2nd XI",
+        "Felling 2nd XI", "Newcastle City CC 2nd XI", "Chester Le Street 2nd XI",
+        "Ashington 2nd XI", "South Northumberland 2nd XI", "Newcastle 2nd XI",
+        "Tynemouth 2nd XI", "Benwell Hill 2nd XI", "Tynedale 2nd XI",
+        "Hetton Lyons 2nd XI", "Whitburn 2nd XI", "Castle Eden 2nd XI",
+    ]
+    ground_assignments = {
+        "Newcastle 1st XI":            "Newcastle",
+        "Newcastle 2nd XI":            "Newcastle",
+        "Benwell Hill 1st XI":         "Benwell Hill",
+        "Benwell Hill 2nd XI":         "Benwell Hill",
+        "Chester Le Street 1st XI":    "Chester Le Street",
+        "Chester Le Street 2nd XI":    "Chester Le Street",
+        "Ashington 1st XI":            "Ashington",
+        "Ashington 2nd XI":            "Ashington",
+        "South Northumberland 1st XI": "South Northumberland",
+        "South Northumberland 2nd XI": "South Northumberland",
+        "Hetton Lyons 1st XI":         "Hetton Lyons",
+        "Hetton Lyons 2nd XI":         "Hetton Lyons",
+        "Felling 1st XI":              "Felling",
+        "Felling 2nd XI":              "Felling",
+        "Castle Eden 1st XI":          "Castle Eden",
+        "Castle Eden 2nd XI":          "Castle Eden",
+    }
+    blackout_dates = [date(2025, 4, 19), date(2025, 5, 3), date(2025, 5, 26)]
+    leagues = [
+        {"name": "Division 1", "teams": division_1},
+        {"name": "Division 2", "teams": division_2},
     ]
 
-    blackout_dates = [
-        date(2025, 4, 19),
-        date(2025, 5, 3),
-        date(2025, 5, 26),
-    ]
+    print("Solving with OR-Tools CP-SAT...")
+    result = schedule_leagues_or_tools(
+        leagues, date(2025, 4, 5), blackout_dates, ground_assignments
+    )
 
-    start = date(2025, 4, 5)
+    for league in leagues:
+        name = league["name"]
+        print(f"\n{'='*55}\n{name}\n{'='*55}")
+        print_schedule_by_round(result["schedules"][name], league["teams"])
+        check_home_away_balance(result["schedules"][name], league["teams"])
+        export_to_csv(result["schedules"][name], f"{name.lower().replace(' ','_')}.csv")
 
-    for name, teams in [("Division 1", division_1), ("Division 2", division_2)]:
-        print(f"\n{'='*50}\n{name}\n{'='*50}")
-        fixtures = generate_round_robin(teams)
-        rounds = group_into_rounds(fixtures, teams)
-        schedule = assign_dates(rounds, start, blackout_dates)
-        print_schedule_by_round(schedule, teams)
-        check_home_away_balance(schedule, teams)
-        export_to_csv(schedule, filename=f"{name.lower().replace(' ', '_')}_fixtures.csv")
+    if result["conflicts"]:
+        print(f"\nWARNING: {len(result['conflicts'])} unavoidable ground conflict(s):")
+        for c in result["conflicts"]:
+            print(f"  {c['date']} -- {c['ground']}: "
+                  f"{c['team1']} ({c['league1']}) & {c['team2']} ({c['league2']})")
+    else:
+        print("\nNo ground conflicts")

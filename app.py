@@ -1,6 +1,6 @@
 import streamlit as st
 from datetime import date
-from scheduler import generate_round_robin, group_into_rounds, assign_dates, assign_dates_multi_league, reschedule_game, resolve_ground_conflicts
+from scheduler import schedule_leagues_or_tools, reschedule_game
 import google.generativeai as genai
 from dotenv import load_dotenv
 import os
@@ -438,64 +438,40 @@ if generate:
             except:
                 pass
 
-    # Build per-league rounds (no dates yet)
-    leagues_rounds = []
-    team_lookup = {}
+    leagues = []
     for cfg in league_configs:
         league_name = cfg["name"]
         teams = [t.strip() for t in cfg["teams_raw"].split("\n") if t.strip()]
         if len(teams) < 2:
             st.warning(f"League '{league_name}' needs at least 2 teams — skipped.")
             continue
-        rounds = group_into_rounds(generate_round_robin(teams), teams)
-        leagues_rounds.append((league_name, rounds))
-        team_lookup[league_name] = teams
+        leagues.append({"name": league_name, "teams": teams})
 
-    # Assign dates — jointly when ground sharing is on so full rounds are
-    # always preserved (no individual game moves that break round integrity)
-    if ground_conflict_enabled and ground_assignments and len(leagues_rounds) > 1:
-        schedules = assign_dates_multi_league(
-            leagues_rounds, start_date, blackout_dates, ground_assignments
-        )
-    else:
-        schedules = {}
-        for league_name, rounds in leagues_rounds:
-            sched = assign_dates(rounds, start_date, blackout_dates)
-            if ground_conflict_enabled and ground_assignments:
-                sched = resolve_ground_conflicts(sched, ground_assignments)
-            schedules[league_name] = sched
-
-    leagues_data = {
-        league_name: {"teams": team_lookup[league_name], "schedule": schedules[league_name]}
-        for league_name, _ in leagues_rounds
-    }
-
-    # Detect any remaining ground conflicts (unavoidable with full-round constraint)
-    remaining_conflicts = []
-    if ground_conflict_enabled and ground_assignments:
-        from collections import defaultdict
-        all_home_by_date = defaultdict(list)
-        for lg_name, lg_data in leagues_data.items():
-            for d, home, away in lg_data["schedule"]:
-                all_home_by_date[d].append((home, lg_name))
-        for d, entries in sorted(all_home_by_date.items()):
-            seen_grounds = {}
-            for team, lg_name in entries:
-                g = ground_assignments.get(team)
-                if g:
-                    if g in seen_grounds:
-                        remaining_conflicts.append({
-                            "date": d, "ground": g,
-                            "team1": seen_grounds[g][0], "league1": seen_grounds[g][1],
-                            "team2": team, "league2": lg_name,
-                        })
-                    else:
-                        seen_grounds[g] = (team, lg_name)
-
-    st.session_state.leagues_data = leagues_data
-    st.session_state.ground_assignments = ground_assignments
-    st.session_state.remaining_conflicts = remaining_conflicts
-    st.session_state.chat_history = []
+    if leagues:
+        with st.spinner("⚙️ Solving schedule with OR-Tools CP-SAT — this may take up to 60 seconds..."):
+            try:
+                result = schedule_leagues_or_tools(
+                    leagues,
+                    start_date,
+                    blackout_dates,
+                    ground_assignments if ground_conflict_enabled else {},
+                    time_limit_seconds=60,
+                )
+                leagues_data = {
+                    lg["name"]: {
+                        "teams":    lg["teams"],
+                        "schedule": result["schedules"][lg["name"]],
+                    }
+                    for lg in leagues
+                }
+                st.session_state.leagues_data       = leagues_data
+                st.session_state.ground_assignments = ground_assignments
+                st.session_state.remaining_conflicts = (
+                    result["conflicts"] if ground_conflict_enabled else []
+                )
+                st.session_state.chat_history = []
+            except Exception as e:
+                st.error(f"Scheduling failed: {e}")
 
 # ── Display ───────────────────────────────────────────────────────────────────
 if "leagues_data" in st.session_state and st.session_state.leagues_data:
