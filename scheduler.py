@@ -53,7 +53,7 @@ def find_clusters(leagues: list, ground_assignments: dict) -> list[list[dict]]:
             clusters.append(component)
     return clusters
 
-# -- 3. Core Solver (Ladder + Optimization) --
+# -- 3. Core Solver with Fixed Penalty Logic --
 def solve_cluster(
     cluster_leagues: list,
     date_slots: list,
@@ -69,6 +69,7 @@ def solve_cluster(
         processed_leagues.append({"name": lg["name"], "teams": teams})
 
     match_vars = {}
+    is_home_vars = {} # Channeling variables to fix the _Sum error
     penalties = []
     max_cluster_rounds = max(2 * (len(lg["teams"]) - 1) for lg in processed_leagues)
 
@@ -77,47 +78,49 @@ def solve_cluster(
         n_teams = len(teams)
         R = 2 * (n_teams - 1)
         match_vars[name] = {}
+        is_home_vars[name] = {}
         
         for r in range(R):
             match_vars[name][r] = {
                 (i, j): model.NewBoolVar(f"{name}_r{r}_t{i}v{j}")
                 for i in range(n_teams) for j in range(n_teams) if i != j
             }
+            # Create a clear Boolean for "is team i at home in round r"
+            is_home_vars[name][r] = {i: model.NewBoolVar(f"{name}_r{r}_t{i}_home") for i in range(n_teams)}
 
-        # Constraints: Round Robin
+        # Constraints: Round Robin & One match per round
         for i in range(n_teams):
             for j in range(n_teams):
                 if i == j: continue
                 model.AddExactlyOne(match_vars[name][r][(i, j)] for r in range(R))
-        for r in range(R):
-            for i in range(n_teams):
-                matches = [match_vars[name][r][(i, j)] for j in range(n_teams) if i != j] + \
-                          [match_vars[name][r][(j, i)] for j in range(n_teams) if i != j]
-                model.AddExactlyOne(matches)
+            
+            for r in range(R):
+                # Channeling: is_home[i] is true IF team i is the home team in ANY match this round
+                model.Add(is_home_vars[name][r][i] == sum(match_vars[name][r][(i, j)] for j in range(n_teams) if i != j))
+                
+                # Each team plays once (Home or Away)
+                model.AddExactlyOne(
+                    [match_vars[name][r][(i, j)] for j in range(n_teams) if i != j] + 
+                    [match_vars[name][r][(j, i)] for j in range(n_teams) if i != j]
+                )
 
-        # Optimization: Penalize consecutive H/A to favor H-A-H-A
+        # Optimization & Hard Streak Constraints
         for i in range(n_teams):
             if teams[i] == "BYE": continue
             for r in range(R - 1):
+                # Penalize Home-Home
                 h2 = model.NewBoolVar(f"h2_{name}_t{i}_r{r}")
-                model.Add(h2 == 1).OnlyEnforceIf([
-                    sum(match_vars[name][r][(i, j)] for j in range(n_teams) if i != j),
-                    sum(match_vars[name][r+1][(i, j)] for j in range(n_teams) if i != j)
-                ])
+                model.Add(h2 == 1).OnlyEnforceIf([is_home_vars[name][r][i], is_home_vars[name][r+1][i]])
                 penalties.append(h2)
+                
+                # Penalize Away-Away (Not Home in r AND Not Home in r+1)
                 a2 = model.NewBoolVar(f"a2_{name}_t{i}_r{r}")
-                model.Add(a2 == 1).OnlyEnforceIf([
-                    sum(match_vars[name][r][(j, i)] for j in range(n_teams) if i != j),
-                    sum(match_vars[name][r+1][(j, i)] for j in range(n_teams) if i != j)
-                ])
+                model.Add(a2 == 1).OnlyEnforceIf([is_home_vars[name][r][i].Not(), is_home_vars[name][r+1][i].Not()])
                 penalties.append(a2)
 
-            # Hard constraints (Ladder)
             for start_r in range(R - max_consecutive):
-                home_block = [match_vars[name][r][(i, j)] for r in range(start_r, start_r + max_consecutive + 1) for j in range(n_teams) if i != j]
-                away_block = [match_vars[name][r][(j, i)] for r in range(start_r, start_r + max_consecutive + 1) for j in range(n_teams) if i != j]
-                model.Add(sum(home_block) <= max_consecutive)
-                model.Add(sum(away_block) <= max_consecutive)
+                model.Add(sum(is_home_vars[name][r][i] for r in range(start_r, start_r + max_consecutive + 1)) <= max_consecutive)
+                model.Add(sum(is_home_vars[name][r][i].Not() for r in range(start_r, start_r + max_consecutive + 1)) <= max_consecutive)
 
     # Shared Ground Constraints
     venue_map = defaultdict(list)
@@ -130,9 +133,8 @@ def solve_cluster(
         for r in range(max_cluster_rounds):
             home_indicators = []
             for div_name, t_idx in occupants:
-                if div_name in match_vars and r in match_vars[div_name]:
-                    div_teams = next(l["teams"] for l in processed_leagues if l["name"] == div_name)
-                    home_indicators.extend([match_vars[div_name][r][(t_idx, j)] for j in range(len(div_teams)) if t_idx != j])
+                if div_name in is_home_vars and r in is_home_vars[div_name]:
+                    home_indicators.append(is_home_vars[div_name][r][t_idx])
             if len(home_indicators) > 1: model.Add(sum(home_indicators) <= 1)
 
     model.Minimize(sum(penalties))
@@ -164,7 +166,6 @@ def schedule_leagues_or_tools(
     max_consecutive: int = 2,
 ) -> dict:
     clusters = find_clusters(leagues, ground_assignments)
-    
     max_total_rounds = 0
     for lg in leagues:
         n = len(lg["teams"])
@@ -173,25 +174,15 @@ def schedule_leagues_or_tools(
         
     date_slots = _build_date_slots(start_date, max_total_rounds, blackout_dates)
     all_schedules = {}
-    
     time_per_cluster = time_limit_seconds // len(clusters) if clusters else time_limit_seconds
 
     for cluster in clusters:
         cluster_names = [l['name'] for l in cluster]
-        
-        # Try Ladder steps
         cluster_result = None
         for ladder_limit in [2, 3, 4]:
-            print(f"Solving {cluster_names} (Max Streak: {ladder_limit})...")
-            cluster_result = solve_cluster(
-                cluster, date_slots, ground_assignments, 
-                time_per_cluster // 3, ladder_limit
-            )
+            cluster_result = solve_cluster(cluster, date_slots, ground_assignments, time_per_cluster // 3, ladder_limit)
             if cluster_result: break
-            
-        if cluster_result is None:
-            raise RuntimeError(f"Infeasible cluster: {cluster_names}")
-            
+        if cluster_result is None: raise RuntimeError(f"Infeasible cluster: {cluster_names}")
         all_schedules.update(cluster_result)
 
-    return {"schedules": all_schedules, "conflicts": []}
+    return {"schedules": all_schedules}
