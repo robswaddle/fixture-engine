@@ -1,7 +1,5 @@
-streamlit
-google-generativeai
-python-dotenv
-pulp
-scipy 
-numpy
-ortools
+streamlit==1.32.0
+google-generativeai==0.3.2
+python-dotenv==1.0.1
+pulp==2.7.0
+ortools==9.10.4067
