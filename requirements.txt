@@ -2,4 +2,4 @@ streamlit
 google-generativeai
 python-dotenv
 pulp
-ortools
+ortools==9.10.4067
