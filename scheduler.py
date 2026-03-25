@@ -1,45 +1,287 @@
 """
-Fixture Scheduling Engine — Double Round-Robin + OR-Tools CP-SAT
-================================================================
-Pipeline (per the design document):
-  1. generate_double_round_robin()   — pure structure, no dates assigned
-  2. schedule_leagues_or_tools()     — CP-SAT assigns rounds to dates
+Fixture Scheduling Engine — OR-Tools CP-SAT (match-level model)
+===============================================================
 
-Constraints
------------
-  C1  Each round on exactly one date                         (hard)
-  C2  At most one round per league per date                  (hard)
-  C4  No team plays more than 2 consecutive home or away     (hard)
-  C3  Shared-venue teams cannot both be home same date       (soft - minimised)
+Why this is better than the old "round-assignment" model
+---------------------------------------------------------
+The old scheduler pre-built pairings with the circle method, then used CP-SAT
+only to shuffle which *date* each pre-built round fell on.  That forced the
+ground-sharing constraint to be *soft* (minimised but never guaranteed zero).
 
-Full rounds and streak-balance are guaranteed.
-Ground conflicts are minimised; any unavoidable residual ones are
-returned alongside the schedule so the caller can surface them.
+This version uses the same full match-level model as the Trial_Code that was
+proven to work.  CP-SAT has complete freedom to decide who plays who in which
+round, and every constraint — including "shared-ground teams never both home
+on the same matchday" — is **hard**.  Violations are structurally impossible.
+
+Model variables
+---------------
+  match_vars[division][round][(home_idx, away_idx)]  ∈ {0, 1}
+  = 1  iff  teams[home_idx] hosts teams[away_idx] in that round
+
+Constraints (all HARD)
+-----------------------
+  C1  Each ordered pair (i→j) plays exactly once across all rounds
+  C2  Each team plays exactly once per round (full rounds guaranteed)
+  C3  No more than `max_consecutive` consecutive home or away games
+  C4  Shared-ground pair never both at home in the same round
+
+Calendar
+--------
+Rounds are numbered 0 … R-1.  Calendar dates are built from start_date
+by skipping blackout dates; round r always maps to the (r+1)-th available
+Saturday.  Because all divisions run in lockstep (same round index = same
+matchday), the C4 cross-division constraint is trivially correct.
+
+Fallback
+--------
+If no solution is found with max_consecutive=2, the solver automatically
+retries with max_consecutive=3 before raising an error.
+
+Output
+------
+Returns the same dict that app.py already expects:
+  {
+    "schedules":  { league_name: [(date, home_team, away_team), …] },
+    "conflicts":  []   # always empty — ground conflicts are impossible
+  }
 """
 
-from datetime import date, timedelta
-from collections import defaultdict
+from __future__ import annotations
+
 import csv
+from collections import defaultdict
+from datetime import date, timedelta
 
 
-# ── 1. Double Round-Robin Generator ─────────────────────────────────────────
+# ── 1. Calendar helper ────────────────────────────────────────────────────────
+
+def _build_date_slots(
+    start_date: date,
+    num_slots: int,
+    blackout_dates: list,
+) -> list:
+    """Return the first `num_slots` weekly dates from start_date, skipping blackouts."""
+    blackout_set = set(blackout_dates)
+    slots, d = [], start_date
+    while len(slots) < num_slots:
+        if d not in blackout_set:
+            slots.append(d)
+        d += timedelta(days=7)
+    return slots
+
+
+# ── 2. Main CP-SAT solver ─────────────────────────────────────────────────────
+
+def schedule_leagues_or_tools(
+    leagues: list,
+    start_date: date,
+    blackout_dates: list = [],
+    ground_assignments: dict = {},
+    time_limit_seconds: int = 60,
+    max_consecutive: int = 2,
+) -> dict:
+    """Schedule a double round-robin for each league using CP-SAT.
+
+    Parameters
+    ----------
+    leagues : list of {"name": str, "teams": list[str]}
+    start_date : date
+    blackout_dates : list of date — matchdays to skip in the calendar
+    ground_assignments : dict {team_name: venue_name}
+        Teams with the same venue name will never both be at home
+        on the same matchday (hard constraint, guaranteed zero violations).
+    time_limit_seconds : CP-SAT wall-clock limit per solve attempt
+    max_consecutive : max consecutive home *or* away allowed (default 2)
+
+    Returns
+    -------
+    {
+        "schedules": {league_name: [(date, home_team, away_team), ...]},
+        "conflicts": []
+    }
+    """
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError as exc:
+        raise ImportError(
+            "ortools is required.  Install it with:  pip install ortools"
+        ) from exc
+
+    if not leagues:
+        return {"schedules": {}, "conflicts": []}
+
+    # Pad odd-team leagues with a BYE
+    leagues = [
+        {**lg, "teams": list(lg["teams"]) + (["BYE"] if len(lg["teams"]) % 2 else [])}
+        for lg in leagues
+    ]
+
+    # Double round-robin: R = 2*(n-1) rounds per division
+    rounds_per_league = {lg["name"]: 2 * (len(lg["teams"]) - 1) for lg in leagues}
+    max_rounds = max(rounds_per_league.values())
+    date_slots = _build_date_slots(start_date, max_rounds, blackout_dates)
+
+    # Team-index maps per division
+    team_index = {lg["name"]: {t: i for i, t in enumerate(lg["teams"])} for lg in leagues}
+
+    # ── Build model ───────────────────────────────────────────────────────────
+    model = cp_model.CpModel()
+
+    # match_vars[div_name][round][(i, j)]
+    match_vars: dict = {}
+    for lg in leagues:
+        name, teams = lg["name"], lg["teams"]
+        n = len(teams)
+        R = rounds_per_league[name]
+        match_vars[name] = {
+            r: {
+                (i, j): model.new_bool_var(f"m__{name}__r{r}__{i}v{j}")
+                for i in range(n) for j in range(n) if i != j
+            }
+            for r in range(R)
+        }
+
+    # C1 — Each ordered pair plays exactly once
+    for lg in leagues:
+        name, teams = lg["name"], lg["teams"]
+        n = len(teams)
+        R = rounds_per_league[name]
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                model.add_exactly_one(match_vars[name][r][(i, j)] for r in range(R))
+
+    # C2 — Each team plays exactly once per round
+    for lg in leagues:
+        name, teams = lg["name"], lg["teams"]
+        n = len(teams)
+        R = rounds_per_league[name]
+        for r in range(R):
+            for i in range(n):
+                appearances = (
+                    [match_vars[name][r][(i, j)] for j in range(n) if j != i]  # home
+                    + [match_vars[name][r][(j, i)] for j in range(n) if j != i]  # away
+                )
+                model.add_exactly_one(appearances)
+
+    # C3 — Streak constraint: no more than max_consecutive consecutive H or A
+    block = max_consecutive + 1
+    for lg in leagues:
+        name, teams = lg["name"], lg["teams"]
+        n = len(teams)
+        R = rounds_per_league[name]
+        for i in range(n):
+            if teams[i] == "BYE":
+                continue
+            for start_r in range(R - block + 1):
+                # Home games in window
+                home_terms = [
+                    match_vars[name][r][(i, j)]
+                    for r in range(start_r, start_r + block)
+                    for j in range(n) if j != i
+                ]
+                # Away games in window
+                away_terms = [
+                    match_vars[name][r][(j, i)]
+                    for r in range(start_r, start_r + block)
+                    for j in range(n) if j != i
+                ]
+                model.add(sum(home_terms) <= max_consecutive)
+                model.add(sum(away_terms) <= max_consecutive)
+
+    # C4 — Shared-ground hard constraint
+    # Build: venue -> list of (div_name, team_idx)
+    venue_occupants: dict = defaultdict(list)
+    for team, venue in ground_assignments.items():
+        if team == "BYE":
+            continue
+        for lg in leagues:
+            if team in team_index[lg["name"]]:
+                venue_occupants[venue].append((lg["name"], team_index[lg["name"]][team]))
+                break  # each team is in exactly one league
+
+    for venue, occupants in venue_occupants.items():
+        if len(occupants) < 2:
+            continue
+        all_R = max(rounds_per_league[div] for div, _ in occupants)
+        for r in range(all_R):
+            home_indicators = []
+            for div_name, team_idx in occupants:
+                R = rounds_per_league[div_name]
+                if r >= R:
+                    continue
+                n = len(next(lg["teams"] for lg in leagues if lg["name"] == div_name))
+                home_indicators.extend(
+                    match_vars[div_name][r][(team_idx, j)]
+                    for j in range(n) if j != team_idx
+                )
+            if len(home_indicators) >= 2:
+                model.add(sum(home_indicators) <= 1)
+
+    # ── Solve ─────────────────────────────────────────────────────────────────
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit_seconds
+    solver.parameters.log_search_progress = False
+    # num_workers API name changed between ortools versions — try both
+    for param_name in ("num_workers", "num_search_workers"):
+        try:
+            setattr(solver.parameters, param_name, 8)
+            break
+        except AttributeError:
+            continue
+
+    status = solver.solve(model)
+
+    # Automatic fallback: relax streak by 1 and retry once
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        if max_consecutive < 3:
+            return schedule_leagues_or_tools(
+                [{**lg, "teams": [t for t in lg["teams"] if t != "BYE"]} for lg in leagues],
+                start_date,
+                blackout_dates,
+                ground_assignments,
+                time_limit_seconds,
+                max_consecutive=max_consecutive + 1,
+            )
+        raise RuntimeError(
+            "OR-Tools could not find a feasible schedule within the time limit. "
+            "Try increasing time_limit_seconds or adjusting blackout dates."
+        )
+
+    # ── Extract results ───────────────────────────────────────────────────────
+    schedules: dict = {}
+    for lg in leagues:
+        name, teams = lg["name"], lg["teams"]
+        n = len(teams)
+        R = rounds_per_league[name]
+        entries = []
+        for r in range(R):
+            match_date = date_slots[r] if r < len(date_slots) else date_slots[-1]
+            for i in range(n):
+                for j in range(n):
+                    if i == j:
+                        continue
+                    if solver.value(match_vars[name][r][(i, j)]) == 1:
+                        home, away = teams[i], teams[j]
+                        if home != "BYE" and away != "BYE":
+                            entries.append((match_date, home, away))
+        entries.sort(key=lambda x: x[0])
+        schedules[name] = entries
+
+    return {"schedules": schedules, "conflicts": []}
+
+
+# ── 3. Legacy API shims ────────────────────────────────────────────────────────
+# These keep app.py working with zero changes.
 
 def generate_double_round_robin(teams: list) -> list:
-    """Return all matches for a double round-robin using the circle method.
-
-    Returns a list of match dicts:
-        {"id": int, "home": str, "away": str, "round": int}
-
-    Total rounds = 2 * (n-1).  Every round has exactly n//2 fixtures.
-    Second half is the home/away inverse of the first half.
-    """
+    """Circle-method double round-robin — kept for backwards compatibility."""
     team_list = list(teams)
     if len(team_list) % 2 == 1:
         team_list.append("BYE")
-
     n = len(team_list)
     matches, match_id, first_half = [], 0, []
-
     for round_idx in range(n - 1):
         rnd = []
         for i in range(n // 2):
@@ -51,215 +293,16 @@ def generate_double_round_robin(teams: list) -> list:
                 match_id += 1
         first_half.append(rnd)
         team_list = [team_list[0]] + [team_list[-1]] + team_list[1:-1]
-
     offset = n - 1
     for r_idx, rnd in enumerate(first_half):
         for m in rnd:
-            matches.append({
-                "id":    match_id,
-                "home":  m["away"],
-                "away":  m["home"],
-                "round": r_idx + offset,
-            })
+            matches.append({"id": match_id, "home": m["away"], "away": m["home"],
+                             "round": r_idx + offset})
             match_id += 1
-
     return matches
 
 
-# ── 2. OR-Tools CP-SAT Scheduler ────────────────────────────────────────────
-
-def schedule_leagues_or_tools(
-    leagues: list,
-    start_date,
-    blackout_dates: list = [],
-    ground_assignments: dict = {},
-    time_limit_seconds: int = 60,
-) -> dict:
-    """Assign rounds to dates across multiple leagues using CP-SAT.
-
-    Parameters
-    ----------
-    leagues            : list of {"name": str, "teams": list[str]}
-    start_date         : datetime.date
-    blackout_dates     : list of datetime.date  -- weeks to skip
-    ground_assignments : dict  team_name -> venue_name
-    time_limit_seconds : int
-
-    Returns
-    -------
-    dict {
-        "schedules":  {league_name: [(date, home, away), ...]},
-        "conflicts":  [{"date", "ground", "team1", "league1",
-                        "team2", "league2"}, ...]
-    }
-    """
-    from ortools.sat.python import cp_model
-
-    # Step 1: Generate all matches
-    all_matches, league_num_rounds = [], {}
-    match_id = 0
-    for li, league in enumerate(leagues):
-        raw    = generate_double_round_robin(league["teams"])
-        n_rnds = max(m["round"] for m in raw) + 1
-        league_num_rounds[league["name"]] = n_rnds
-        for m in raw:
-            all_matches.append({**m, "id": match_id,
-                                 "league": league["name"], "league_idx": li})
-            match_id += 1
-
-    # Step 2: Build exactly max_rounds non-blackout date slots.
-    # Providing exactly this many slots forces every slot to be used so
-    # consecutive slot index == consecutive game -- required for C4.
-    blackout_set = set(blackout_dates)
-    max_rounds   = max(league_num_rounds.values())
-    slots, d     = [], start_date
-    while len(slots) < max_rounds:
-        if d not in blackout_set:
-            slots.append(d)
-        d += timedelta(days=7)
-    ND = len(slots)
-
-    # Step 3: Precompute lookup tables
-    round_home_teams = defaultdict(list)
-    for m in all_matches:
-        round_home_teams[(m["league"], m["round"])].append(m["home"])
-
-    ground_to_teams = defaultdict(list)
-    for team, venue in ground_assignments.items():
-        if team not in ground_to_teams[venue]:
-            ground_to_teams[venue].append(team)
-    shared_groups = {v: t for v, t in ground_to_teams.items() if len(t) >= 2}
-
-    team_home_rounds = defaultdict(list)
-    team_away_rounds = defaultdict(list)
-    for m in all_matches:
-        team_home_rounds[m["home"]].append((m["league"], m["round"]))
-        team_away_rounds[m["away"]].append((m["league"], m["round"]))
-
-    all_team_list = [t for lg in leagues for t in lg["teams"]]
-
-    # Step 4: Build CP-SAT model
-    model = cp_model.CpModel()
-
-    # Decision variables: y[(league, round, date_idx)] in {0, 1}
-    y = {}
-    for league in leagues:
-        name = league["name"]
-        for r in range(league_num_rounds[name]):
-            for di in range(ND):
-                y[(name, r, di)] = model.NewBoolVar(f"y_{name}_{r}_{di}")
-
-    # C1 -- Each round assigned to exactly one date
-    for league in leagues:
-        name = league["name"]
-        for r in range(league_num_rounds[name]):
-            model.AddExactlyOne(y[(name, r, di)] for di in range(ND))
-
-    # C2 -- At most one round per league per date (guarantees full rounds)
-    for league in leagues:
-        name = league["name"]
-        for di in range(ND):
-            model.AddAtMostOne(y[(name, r, di)] for r in range(league_num_rounds[name]))
-
-    # C4 -- Streak constraint (HARD): no team plays 3+ consecutive home or away.
-    # Correct because all slots are used with no gaps, so slot index == game position.
-    for team in all_team_list:
-        h_rounds = team_home_rounds[team]
-        a_rounds = team_away_rounds[team]
-        for di in range(ND - 2):
-            model.Add(sum(
-                y[(lg, r, di)] + y[(lg, r, di+1)] + y[(lg, r, di+2)]
-                for lg, r in h_rounds
-            ) <= 2)
-            model.Add(sum(
-                y[(lg, r, di)] + y[(lg, r, di+1)] + y[(lg, r, di+2)]
-                for lg, r in a_rounds
-            ) <= 2)
-
-    # C3 -- Shared-venue constraint (SOFT): minimised in objective.
-    # Cannot always be fully satisfied alongside C4, so violations are
-    # minimised and surfaced as warnings rather than causing infeasibility.
-    conflict_vars = []
-    for venue, group_teams in shared_groups.items():
-        group_set = set(group_teams)
-        for di in range(ND):
-            terms = []
-            for league in leagues:
-                name = league["name"]
-                for r in range(league_num_rounds[name]):
-                    cnt = sum(1 for t in round_home_teams[(name, r)] if t in group_set)
-                    if cnt > 0:
-                        terms.append(y[(name, r, di)] * cnt)
-            if terms:
-                pv = model.NewBoolVar(f"conf_{venue}_{di}")
-                model.Add(sum(terms) - 1 <= len(terms) * pv)
-                conflict_vars.append(pv)
-
-    if conflict_vars:
-        model.Minimize(sum(conflict_vars))
-
-    # Step 5: Solve
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = time_limit_seconds
-    solver.parameters.num_workers         = 8
-    solver.parameters.log_search_progress = False
-
-    status = solver.Solve(model)
-
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        raise RuntimeError(
-            "OR-Tools could not find a feasible schedule. "
-            "Try adjusting blackout dates or team counts."
-        )
-
-    # Step 6: Extract schedule
-    round_to_date = {}
-    for league in leagues:
-        name = league["name"]
-        for r in range(league_num_rounds[name]):
-            for di in range(ND):
-                if solver.Value(y[(name, r, di)]) == 1:
-                    round_to_date[(name, r)] = slots[di]
-                    break
-
-    schedules = {league["name"]: [] for league in leagues}
-    for m in all_matches:
-        assigned = round_to_date[(m["league"], m["round"])]
-        schedules[m["league"]].append((assigned, m["home"], m["away"]))
-
-    for name in schedules:
-        schedules[name].sort(key=lambda g: g[0])
-
-    # Step 7: Detect residual ground conflicts
-    all_home_by_date = defaultdict(list)
-    for name, sched in schedules.items():
-        for d_game, home, away in sched:
-            all_home_by_date[d_game].append((home, name))
-
-    remaining_conflicts = []
-    for d_game, entries in sorted(all_home_by_date.items()):
-        seen_grounds = {}
-        for team, lg_name in entries:
-            g = ground_assignments.get(team)
-            if g:
-                if g in seen_grounds:
-                    remaining_conflicts.append({
-                        "date":    d_game,
-                        "ground":  g,
-                        "team1":   seen_grounds[g][0],
-                        "league1": seen_grounds[g][1],
-                        "team2":   team,
-                        "league2": lg_name,
-                    })
-                else:
-                    seen_grounds[g] = (team, lg_name)
-
-    return {"schedules": schedules, "conflicts": remaining_conflicts}
-
-
-# ── Legacy shims ──────────────────────────────────────────────────────────────
-
-def generate_round_robin(teams):
+def generate_round_robin(teams: list) -> list:
     matches  = generate_double_round_robin(teams)
     n_rounds = max(m["round"] for m in matches) + 1
     rounds   = [[] for _ in range(n_rounds)]
@@ -267,8 +310,11 @@ def generate_round_robin(teams):
         rounds[m["round"]].append((m["home"], m["away"]))
     return rounds
 
+
 def group_into_rounds(fixtures, teams):
+    """No-op shim kept for backwards compatibility."""
     return fixtures
+
 
 def assign_dates(rounds, start_date, blackout_dates=[], interval_days=7):
     schedule, current_date = [], start_date
@@ -280,6 +326,7 @@ def assign_dates(rounds, start_date, blackout_dates=[], interval_days=7):
             schedule.append((current_date, home, away))
         current_date += timedelta(days=interval_days)
     return schedule
+
 
 def reschedule_game(schedule, home_team, away_team, new_date):
     updated, rescheduled = [], False
@@ -293,23 +340,14 @@ def reschedule_game(schedule, home_team, away_team, new_date):
     updated.sort(key=lambda x: x[0])
     return updated, rescheduled
 
+
 def resolve_ground_conflicts(schedule, ground_assignments):
-    updated = list(schedule)
-    for match_date in sorted(set(g[0] for g in updated)):
-        grounds_used = {}
-        for game in [g for g in updated if g[0] == match_date]:
-            ground = ground_assignments.get(game[1])
-            if ground:
-                if ground in grounds_used:
-                    idx = updated.index(game)
-                    updated[idx] = (match_date + timedelta(days=7), game[1], game[2])
-                else:
-                    grounds_used[ground] = game[1]
-    updated.sort(key=lambda x: x[0])
-    return updated
+    """Legacy shim — ground conflicts are structurally impossible with the
+    CP-SAT model, so this is a no-op.  Kept so app.py needs no changes."""
+    return schedule
 
 
-# ── CLI helpers ───────────────────────────────────────────────────────────────
+# ── 4. CLI helpers ─────────────────────────────────────────────────────────────
 
 def check_home_away_balance(schedule, teams):
     print("\n--- Home/Away Balance ---")
@@ -318,7 +356,8 @@ def check_home_away_balance(schedule, teams):
         a = sum(1 for g in schedule if g[2] == team)
         print(f"  {team}: {h}H {a}A")
 
-def print_schedule_by_round(schedule, teams):
+
+def print_schedule_by_round(schedule, teams=None):
     print("\n--- Schedule ---")
     current_date, rn = None, 1
     for game in schedule:
@@ -327,6 +366,7 @@ def print_schedule_by_round(schedule, teams):
             print(f"\nRound {rn} -- {current_date.strftime('%A %d %B %Y')}")
             rn += 1
         print(f"  {game[1]} vs {game[2]}")
+
 
 def export_to_csv(schedule, filename="fixtures.csv"):
     with open(filename, "w", newline="") as f:
@@ -337,7 +377,7 @@ def export_to_csv(schedule, filename="fixtures.csv"):
     print(f"Exported to {filename}")
 
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
+# ── 5. CLI demo ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     division_1 = [
@@ -376,22 +416,22 @@ if __name__ == "__main__":
         {"name": "Division 2", "teams": division_2},
     ]
 
-    print("Solving with OR-Tools CP-SAT...")
+    print("Solving with OR-Tools CP-SAT (match-level model)…")
     result = schedule_leagues_or_tools(
-        leagues, date(2025, 4, 5), blackout_dates, ground_assignments
+        leagues, date(2025, 4, 5), blackout_dates, ground_assignments,
+        time_limit_seconds=60,
     )
 
     for league in leagues:
         name = league["name"]
         print(f"\n{'='*55}\n{name}\n{'='*55}")
-        print_schedule_by_round(result["schedules"][name], league["teams"])
+        print_schedule_by_round(result["schedules"][name])
         check_home_away_balance(result["schedules"][name], league["teams"])
-        export_to_csv(result["schedules"][name], f"{name.lower().replace(' ','_')}.csv")
+        export_to_csv(result["schedules"][name], f"{name.lower().replace(' ', '_')}.csv")
 
     if result["conflicts"]:
-        print(f"\nWARNING: {len(result['conflicts'])} unavoidable ground conflict(s):")
+        print(f"\nWARNING: {len(result['conflicts'])} ground conflict(s) remain:")
         for c in result["conflicts"]:
-            print(f"  {c['date']} -- {c['ground']}: "
-                  f"{c['team1']} ({c['league1']}) & {c['team2']} ({c['league2']})")
+            print(f"  {c['date']} — {c['ground']}: {c['team1']} & {c['team2']}")
     else:
-        print("\nNo ground conflicts")
+        print("\n✓ No ground conflicts.")
