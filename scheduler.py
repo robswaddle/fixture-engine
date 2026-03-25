@@ -13,8 +13,9 @@ def _build_date_slots(start_date: date, num_slots: int, blackout_dates: list) ->
         d += timedelta(days=7)
     return slots
 
-# -- 2. Clustering Logic --
+# -- 2. Tiered Clustering Logic --
 def find_clusters(leagues: list, ground_assignments: dict) -> list[list[dict]]:
+    # We maintain the input order to preserve "Tier" priority
     team_to_league = {}
     for lg in leagues:
         for team in lg["teams"]:
@@ -38,7 +39,9 @@ def find_clusters(leagues: list, ground_assignments: dict) -> list[list[dict]]:
     clusters = []
     league_map = {lg["name"]: lg for lg in leagues}
     
-    for lg_name in league_map:
+    # Process in order of input (Tier Priority)
+    for lg in leagues:
+        lg_name = lg["name"]
         if lg_name not in visited:
             component = []
             queue = deque([lg_name])
@@ -53,13 +56,14 @@ def find_clusters(leagues: list, ground_assignments: dict) -> list[list[dict]]:
             clusters.append(component)
     return clusters
 
-# -- 3. Core Solver with Fixed Penalty Logic --
+# -- 3. Core Solver (With Locked-Date Awareness) --
 def solve_cluster(
     cluster_leagues: list,
     date_slots: list,
     ground_assignments: dict,
     time_limit_seconds: int,
-    max_consecutive: int
+    max_consecutive: int,
+    existing_home_slots: dict # New: Map of {round: {venue: True}}
 ) -> dict | None:
     model = cp_model.CpModel()
     processed_leagues = []
@@ -69,7 +73,7 @@ def solve_cluster(
         processed_leagues.append({"name": lg["name"], "teams": teams})
 
     match_vars = {}
-    is_home_vars = {} # Channeling variables to fix the _Sum error
+    is_home_vars = {}
     penalties = []
     max_cluster_rounds = max(2 * (len(lg["teams"]) - 1) for lg in processed_leagues)
 
@@ -85,57 +89,54 @@ def solve_cluster(
                 (i, j): model.NewBoolVar(f"{name}_r{r}_t{i}v{j}")
                 for i in range(n_teams) for j in range(n_teams) if i != j
             }
-            # Create a clear Boolean for "is team i at home in round r"
             is_home_vars[name][r] = {i: model.NewBoolVar(f"{name}_r{r}_t{i}_home") for i in range(n_teams)}
 
-        # Constraints: Round Robin & One match per round
+        # Constraints
         for i in range(n_teams):
             for j in range(n_teams):
                 if i == j: continue
                 model.AddExactlyOne(match_vars[name][r][(i, j)] for r in range(R))
             
             for r in range(R):
-                # Channeling: is_home[i] is true IF team i is the home team in ANY match this round
                 model.Add(is_home_vars[name][r][i] == sum(match_vars[name][r][(i, j)] for j in range(n_teams) if i != j))
-                
-                # Each team plays once (Home or Away)
                 model.AddExactlyOne(
                     [match_vars[name][r][(i, j)] for j in range(n_teams) if i != j] + 
                     [match_vars[name][r][(j, i)] for j in range(n_teams) if i != j]
                 )
 
-        # Optimization & Hard Streak Constraints
+        # Optimization & Streak Constraints
         for i in range(n_teams):
             if teams[i] == "BYE": continue
             for r in range(R - 1):
-                # Penalize Home-Home
-                h2 = model.NewBoolVar(f"h2_{name}_t{i}_r{r}")
+                h2, a2 = model.NewBoolVar('h2'), model.NewBoolVar('a2')
                 model.Add(h2 == 1).OnlyEnforceIf([is_home_vars[name][r][i], is_home_vars[name][r+1][i]])
-                penalties.append(h2)
-                
-                # Penalize Away-Away (Not Home in r AND Not Home in r+1)
-                a2 = model.NewBoolVar(f"a2_{name}_t{i}_r{r}")
                 model.Add(a2 == 1).OnlyEnforceIf([is_home_vars[name][r][i].Not(), is_home_vars[name][r+1][i].Not()])
-                penalties.append(a2)
+                penalties.extend([h2, a2])
 
             for start_r in range(R - max_consecutive):
                 model.Add(sum(is_home_vars[name][r][i] for r in range(start_r, start_r + max_consecutive + 1)) <= max_consecutive)
                 model.Add(sum(is_home_vars[name][r][i].Not() for r in range(start_r, start_r + max_consecutive + 1)) <= max_consecutive)
 
-    # Shared Ground Constraints
+    # Shared Ground Constraints (Dynamic + Static)
     venue_map = defaultdict(list)
     for team, venue in ground_assignments.items():
         for lg in processed_leagues:
             if team in lg["teams"]: venue_map[venue].append((lg["name"], lg["teams"].index(team)))
 
     for venue, occupants in venue_map.items():
-        if len(occupants) < 2: continue
         for r in range(max_cluster_rounds):
             home_indicators = []
+            # 1. Current Cluster's teams
             for div_name, t_idx in occupants:
                 if div_name in is_home_vars and r in is_home_vars[div_name]:
                     home_indicators.append(is_home_vars[div_name][r][t_idx])
-            if len(home_indicators) > 1: model.Add(sum(home_indicators) <= 1)
+            
+            # 2. Add Static block if a higher-tier team already took this ground in this round
+            if existing_home_slots.get(r, {}).get(venue):
+                # We add a constant 1 to the sum. Since sum <= 1, this forces all home_indicators to 0.
+                model.Add(sum(home_indicators) == 0)
+            elif len(home_indicators) > 1:
+                model.Add(sum(home_indicators) <= 1)
 
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver()
@@ -158,14 +159,11 @@ def solve_cluster(
 
 # -- 4. Orchestrator --
 def schedule_leagues_or_tools(
-    leagues: list,
-    start_date: date,
-    blackout_dates: list = [],
-    ground_assignments: dict = {},
-    time_limit_seconds: int = 300, 
-    max_consecutive: int = 2,
+    leagues: list, start_date: date, blackout_dates: list = [],
+    ground_assignments: dict = {}, time_limit_seconds: int = 300, max_consecutive: int = 2
 ) -> dict:
     clusters = find_clusters(leagues, ground_assignments)
+    
     max_total_rounds = 0
     for lg in leagues:
         n = len(lg["teams"])
@@ -174,15 +172,34 @@ def schedule_leagues_or_tools(
         
     date_slots = _build_date_slots(start_date, max_total_rounds, blackout_dates)
     all_schedules = {}
+    
+    # This keeps track of which grounds are used in which rounds by higher-tier clusters
+    locked_home_slots = defaultdict(lambda: defaultdict(bool)) 
+
     time_per_cluster = time_limit_seconds // len(clusters) if clusters else time_limit_seconds
 
     for cluster in clusters:
         cluster_names = [l['name'] for l in cluster]
         cluster_result = None
+        
         for ladder_limit in [2, 3, 4]:
-            cluster_result = solve_cluster(cluster, date_slots, ground_assignments, time_per_cluster // 3, ladder_limit)
+            cluster_result = solve_cluster(
+                cluster, date_slots, ground_assignments, 
+                time_per_cluster // 3, ladder_limit, locked_home_slots
+            )
             if cluster_result: break
-        if cluster_result is None: raise RuntimeError(f"Infeasible cluster: {cluster_names}")
+            
+        if cluster_result is None:
+            raise RuntimeError(f"Infeasible tier: {cluster_names}. Higher tier teams have blocked too many grounds.")
+            
+        # Update our global "Lock" tracker for the next cluster
+        for div_name, fixtures in cluster_result.items():
+            for g_date, home, away in fixtures:
+                r_idx = date_slots.index(g_date)
+                venue = ground_assignments.get(home)
+                if venue:
+                    locked_home_slots[r_idx][venue] = True
+                    
         all_schedules.update(cluster_result)
 
     return {"schedules": all_schedules}
