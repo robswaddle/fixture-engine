@@ -7,7 +7,7 @@ import json
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Import only the new orchestrator
+# Import the orchestrator from your scheduler.py
 from scheduler import schedule_leagues_or_tools
 
 load_dotenv()
@@ -33,7 +33,6 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; color: #1A1A2E;
 
 # --- Logic Helpers ---
 def reschedule_game(schedule, home_team, away_team, new_date):
-    """Simple helper to manually move a game in the existing list."""
     updated, found = [], False
     for game in schedule:
         if game[1].lower() == home_team.lower() and game[2].lower() == away_team.lower():
@@ -45,11 +44,11 @@ def reschedule_game(schedule, home_team, away_team, new_date):
     return updated, found
 
 def detect_shared_grounds(league_configs):
-    """Auto-suggest pairs based on common prefixes/suffixes."""
     from collections import defaultdict
     all_teams = [t.strip() for cfg in league_configs for t in cfg["teams_raw"].split("\n") if t.strip()]
     groups = defaultdict(list)
     for t in all_teams:
+        # Simple split logic to find common club names
         base = t.split(' 1st')[0].split(' 2nd')[0].split(' 3rd')[0].strip()
         groups[base].append(t)
     
@@ -61,6 +60,13 @@ def detect_shared_grounds(league_configs):
                     pairs.append(f"{g[i]}, {g[j]}")
     return "\n".join(pairs)
 
+# --- Dummy Data ---
+DEFAULT_NAMES = ["Division 1", "Division 2"]
+DEFAULT_TEAMS = [
+    "Burnmoor 1st XI\nSouth Northumberland 1st XI\nCastle Eden 1st XI\nFelling 1st XI\nChester Le Street 1st XI\nHetton Lyons 1st XI\nBurnopfield 1st XI\nNewcastle 1st XI\nAshington 1st XI\nShotley Bridge 1st XI\nBenwell Hill 1st XI\nSeaham Harbour 1st XI",
+    "Felling 2nd XI\nNewcastle City CC 2nd XI\nChester Le Street 2nd XI\nAshington 2nd XI\nSouth Northumberland 2nd XI\nNewcastle 2nd XI\nTynemouth 2nd XI\nBenwell Hill 2nd XI\nTynedale 2nd XI\nHetton Lyons 2nd XI\nWhitburn 2nd XI\nCastle Eden 2nd XI"
+]
+
 # --- Sidebar Inputs ---
 with st.sidebar:
     st.header("Season Setup")
@@ -69,10 +75,13 @@ with st.sidebar:
     
     num_leagues = st.number_input("Number of Leagues", 1, 15, 2)
     league_configs = []
-    for i in range(num_leagues):
+    for i in range(int(num_leagues)):
         st.divider()
-        l_name = st.text_input(f"League {i+1} Name", f"Division {i+1}")
-        l_teams = st.text_area(f"Teams (one per line)", height=100, key=f"t{i}")
+        d_name = DEFAULT_NAMES[i] if i < len(DEFAULT_NAMES) else f"Division {i+1}"
+        d_teams = DEFAULT_TEAMS[i] if i < len(DEFAULT_TEAMS) else ""
+        
+        l_name = st.text_input(f"League {i+1} Name", value=d_name)
+        l_teams = st.text_area(f"Teams in {l_name}", value=d_teams, height=150, key=f"t{i}")
         league_configs.append({"name": l_name, "teams_raw": l_teams})
     
     st.divider()
@@ -80,7 +89,7 @@ with st.sidebar:
     ground_assignments = {}
     if ground_conflict_enabled:
         suggested = detect_shared_grounds(league_configs)
-        ground_input = st.text_area("Shared Grounds (Team A, Team B)", value=suggested)
+        ground_input = st.text_area("Shared Grounds (Team A, Team B)", value=suggested, height=100)
         for line in ground_input.split("\n"):
             if "," in line:
                 teams = [t.strip() for t in line.split(",")]
@@ -93,7 +102,6 @@ with st.sidebar:
 st.markdown('<div class="main-header"><h1>⚡ FixtureAI</h1><p>Clustered Dependency Engine for Multi-League Scheduling</p></div>', unsafe_allow_html=True)
 
 if generate:
-    # Parse dates
     blackouts = []
     for d in blackout_input.split("\n"):
         if d.strip():
@@ -102,7 +110,6 @@ if generate:
                 blackouts.append(date(int(year), int(month), int(day)))
             except: pass
 
-    # Format leagues
     leagues = []
     for cfg in league_configs:
         teams = [t.strip() for t in cfg["teams_raw"].split("\n") if t.strip()]
@@ -110,25 +117,23 @@ if generate:
             leagues.append({"name": cfg["name"], "teams": teams})
 
     if leagues:
-        with st.spinner("Analyzing dependencies and solving clusters..."):
+        with st.spinner("Analyzing league clusters and solving..."):
             try:
                 result = schedule_leagues_or_tools(
                     leagues=leagues,
                     start_date=start_date,
                     blackout_dates=blackouts,
                     ground_assignments=ground_assignments,
-                    time_limit_seconds=180 # 3 min max for web
+                    time_limit_seconds=180 
                 )
                 st.session_state.leagues_data = result["schedules"]
                 st.session_state.chat_history = []
-                st.success("Schedules generated successfully!")
             except Exception as e:
                 st.error(f"Solver Error: {str(e)}")
 
 # --- Result Display ---
 if "leagues_data" in st.session_state:
     data = st.session_state.leagues_data
-    
     col_left, col_right = st.columns([3, 2])
     
     with col_left:
@@ -147,8 +152,6 @@ if "leagues_data" in st.session_state:
 
     with col_right:
         st.subheader("📊 Actions & Tools")
-        
-        # CSV Export
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(["League", "Date", "Home", "Away"])
@@ -156,23 +159,21 @@ if "leagues_data" in st.session_state:
             for d, h, a in sched: writer.writerow([l_name, d, h, a])
         st.download_button("📥 Download CSV", output.getvalue(), "fixtures.csv", "text/csv")
         
-        # Chat Assistant
         st.divider()
         st.markdown("**🤖 Fixture Assistant**")
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]): st.write(msg["content"])
         
-        user_msg = st.chat_input("Ask me to move a game or search for a team...")
+        user_msg = st.chat_input("Ask about the fixtures...")
         if user_msg:
             st.session_state.chat_history.append({"role": "user", "content": user_msg})
-            
-            # Simple prompt for AI handling
             all_txt = "\n".join([f"{l}: {g[1]} v {g[2]} on {g[0]}" for l, s in data.items() for g in s])
             prompt = f"Schedule:\n{all_txt}\nUser: {user_msg}\nIf rescheduling, return JSON: {{\"action\":\"reschedule\",\"league\":\"...\",\"home_team\":\"...\",\"away_team\":\"...\",\"new_date\":\"DD/MM/YYYY\"}}. Otherwise, plain text."
             
             response = model.generate_content(prompt).text
             try:
-                action_data = json.loads(response.strip('`json \n'))
+                clean_json = response.strip('`json \n')
+                action_data = json.loads(clean_json)
                 if action_data.get("action") == "reschedule":
                     l_target = action_data["league"]
                     d_str = action_data["new_date"]
@@ -182,7 +183,7 @@ if "leagues_data" in st.session_state:
                     new_sched, success = reschedule_game(data[l_target], action_data["home_team"], action_data["away_team"], new_d)
                     if success:
                         st.session_state.leagues_data[l_target] = new_sched
-                        response = f"✅ Moved {action_data['home_team']} vs {action_data['away_team']} to {d_str}."
+                        response = f"✅ Updated: {action_data['home_team']} vs {action_data['away_team']} moved to {d_str}."
             except: pass
             
             st.session_state.chat_history.append({"role": "assistant", "content": response})
